@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 interface Hypervisor {
   name: string
@@ -93,14 +94,17 @@ function formToPayload(f: FormData) {
   }
 }
 
-function HypervisorForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName }: {
+function HypervisorForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, secretKeys }: {
   form: FormData
   setForm: (f: FormData) => void
   onSubmit: () => void
   onCancel: () => void
   submitLabel: string
   disableName?: boolean
+  secretKeys: string[]
 }) {
+  const expectedSecret = form.name ? `proxmox/${form.name}/token_secret` : null
+  const hasSecret = expectedSecret ? secretKeys.includes(expectedSecret) : false
   const set = (field: keyof FormData, value: string | boolean) =>
     setForm({ ...form, [field]: value })
 
@@ -137,6 +141,23 @@ function HypervisorForm({ form, setForm, onSubmit, onCancel, submitLabel, disabl
         </div>
       </div>
 
+      {expectedSecret && (
+        <div style={{
+          padding: '0.4rem 0.75rem',
+          borderRadius: '4px',
+          fontSize: '0.8rem',
+          marginBottom: '0.75rem',
+          background: hasSecret ? '#166534' : '#78350f',
+          color: hasSecret ? '#86efac' : '#fde68a',
+        }}>
+          {hasSecret ? (
+            <span>Secret <code style={{ fontFamily: 'monospace' }}>{expectedSecret}</code> is configured. <Link to="/secrets" style={{ color: '#86efac', textDecoration: 'underline' }}>Update</Link></span>
+          ) : (
+            <span>Missing secret <code style={{ fontFamily: 'monospace' }}>{expectedSecret}</code> — <Link to={`/secrets?key=${encodeURIComponent(expectedSecret)}`} style={{ color: '#fde68a', textDecoration: 'underline' }}>create it on the Secrets page</Link></span>
+          )}
+        </div>
+      )}
+
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
         <label style={{ color: '#8890a0', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
           <input type="checkbox" checked={form.enabled}
@@ -163,6 +184,14 @@ export default function Hypervisors() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [testingName, setTestingName] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<{ name: string; success: boolean; message: string } | null>(null)
+  const [secretKeys, setSecretKeys] = useState<string[]>([])
+
+  function loadSecretKeys() {
+    fetch('/api/secrets/')
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then(setSecretKeys)
+      .catch(() => {})
+  }
 
   function loadHypervisors() {
     fetch('/api/hypervisors/')
@@ -172,7 +201,7 @@ export default function Hypervisors() {
       .finally(() => setLoading(false))
   }
 
-  useEffect(() => { loadHypervisors() }, [])
+  useEffect(() => { loadHypervisors(); loadSecretKeys() }, [])
 
   async function handleCreate() {
     try {
@@ -268,6 +297,7 @@ export default function Hypervisors() {
           onSubmit={handleCreate}
           onCancel={() => setShowAdd(false)}
           submitLabel="Create"
+          secretKeys={secretKeys}
         />
       )}
 
@@ -285,6 +315,7 @@ export default function Hypervisors() {
               onCancel={() => setEditingName(null)}
               submitLabel="Save"
               disableName
+              secretKeys={secretKeys}
             />
           ) : (
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -314,6 +345,11 @@ export default function Hypervisors() {
                     </>
                   )}
                 </div>
+                {hv.token_name && !secretKeys.includes(`proxmox/${hv.name}/token_secret`) && (
+                  <div style={{ fontSize: '0.8rem', marginTop: '0.35rem', color: '#fde68a' }}>
+                    Missing secret <code style={{ fontFamily: 'monospace' }}>proxmox/{hv.name}/token_secret</code> — <Link to={`/secrets?key=${encodeURIComponent(`proxmox/${hv.name}/token_secret`)}`} style={{ color: '#fde68a', textDecoration: 'underline' }}>create it</Link>
+                  </div>
+                )}
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
                 {deleteConfirm === hv.name ? (

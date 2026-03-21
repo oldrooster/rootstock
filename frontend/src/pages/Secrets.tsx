@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 const inputStyle: React.CSSProperties = {
   background: '#0f0f1a',
@@ -49,6 +50,7 @@ const btnSecondary: React.CSSProperties = {
 }
 
 export default function Secrets() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [keys, setKeys] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -56,6 +58,15 @@ export default function Secrets() {
   const [newKey, setNewKey] = useState('')
   const [newValue, setNewValue] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+
+  useEffect(() => {
+    const prefillKey = searchParams.get('key')
+    if (prefillKey) {
+      setNewKey(prefillKey)
+      setShowAdd(true)
+      setSearchParams({}, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   function loadKeys() {
     fetch('/api/secrets/')
