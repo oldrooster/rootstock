@@ -1,0 +1,6 @@
+name: lappy
+endpoint: "https://10.0.0.5:8006"
+node_name: pve
+username: root@pam
+token_name: rootstock
+enabled: true

@@ -1,0 +1,6 @@
+# Static DNS records for infrastructure not managed by Rootstock
+static_records:
+  - hostname: proxmox.cbf.nz
+    ip: 10.0.2.10
+  - hostname: router.cbf.nz
+    ip: 10.0.2.1

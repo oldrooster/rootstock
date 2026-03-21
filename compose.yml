@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    command: >
+      uv run uvicorn app.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --log-level info
+    volumes:
+      - ./backend/app:/app/app
+      - homelab_repo:/homelab
+    env_file:
+      - .env
+    environment:
+      - HOMELAB_REPO_PATH=/homelab
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    volumes:
+      - ./frontend/src:/app/src
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  homelab_repo:

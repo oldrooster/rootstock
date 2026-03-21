@@ -1,0 +1,28 @@
+name: homeassistant
+enabled: true
+host: g2mini
+image: ghcr.io/home-assistant/home-assistant:stable
+network: hass_net
+
+ports:
+  - host: 8123
+    container: 8123
+
+volumes:
+  - host_path: /var/docker_vols/homeassistant/config
+    container_path: /config
+    backup: true
+
+ingress:
+  hostname: hass.cbf.nz
+  backend_port: 8123
+
+dns:
+  hostname: hass.cbf.nz
+  ip: 10.0.2.22
+
+secrets:
+  - HASS_DB_PASSWORD
+
+env:
+  TZ: Pacific/Auckland

@@ -1,0 +1,10 @@
+name: ubuntu-worker-01
+enabled: true
+node: lappy
+cpu: 2
+memory: 4096
+disk: 32
+image: ubuntu-24.04-cloudimg
+user: deploy
+ssh_key: "ssh-ed25519 AAAA..."
+role: container_host
