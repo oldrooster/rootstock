@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import apply, backups, dashboard, dns, git, health, hosts, hypervisors, ingress, secrets, services, settings_router, vms
+from app.routers import apply, backups, containers, dashboard, dns, git, health, hosts, images, ingress, nodes, roles, secrets, services, settings_router, templates, terminal, vms
 
 
 @asynccontextmanager
@@ -30,9 +30,10 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-app.include_router(services.router, prefix="/services", tags=["services"])
+app.include_router(containers.router, prefix="/containers", tags=["containers"])
+app.include_router(services.router, prefix="/services", tags=["services"])  # legacy alias
 app.include_router(vms.router, prefix="/vms", tags=["vms"])
-app.include_router(hypervisors.router, prefix="/hypervisors", tags=["hypervisors"])
+app.include_router(nodes.router, prefix="/nodes", tags=["nodes"])
 app.include_router(git.router, prefix="/git", tags=["git"])
 app.include_router(apply.router, prefix="/apply", tags=["apply"])
 app.include_router(hosts.router, prefix="/hosts", tags=["hosts"])
@@ -42,3 +43,7 @@ app.include_router(ingress.router, prefix="/ingress", tags=["ingress"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 app.include_router(settings_router.router, prefix="/settings", tags=["settings"])
 app.include_router(secrets.router, prefix="/secrets", tags=["secrets"])
+app.include_router(images.router, prefix="/images", tags=["images"])
+app.include_router(templates.router, prefix="/templates", tags=["templates"])
+app.include_router(roles.router, prefix="/roles", tags=["roles"])
+app.include_router(terminal.router, prefix="/terminal", tags=["terminal"])

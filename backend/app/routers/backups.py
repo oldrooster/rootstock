@@ -1,56 +1,65 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.config import settings
-from app.models.backup import BackupEntry, BackupResult
-from app.services.service_store import ServiceStore
+from app.services.backup_service import (
+    BackupPath,
+    ManualBackupPath,
+    get_all_backup_paths,
+    get_manual_paths,
+    save_manual_paths,
+)
+from app.services.container_store import ContainerStore
 
 router = APIRouter()
 
 
-def get_store() -> ServiceStore:
-    return ServiceStore(settings.homelab_repo_path)
+def get_store() -> ContainerStore:
+    return ContainerStore(settings.homelab_repo_path)
 
 
-@router.get("/")
-async def list_backups(store: ServiceStore = Depends(get_store)) -> list[BackupEntry]:
-    services = store.list_all()
-    entries = []
-    for svc in services:
-        for vol in svc.volumes:
-            if vol.backup:
-                entries.append(BackupEntry(
-                    service_name=svc.name,
-                    host=svc.host,
-                    volume_path=vol.host_path,
-                ))
-    return entries
+# --- All paths (derived + manual) ---
 
 
-@router.post("/{service_name}/backup")
-async def trigger_backup(
-    service_name: str,
-    store: ServiceStore = Depends(get_store),
-) -> BackupResult:
-    svc = store.get(service_name)  # raises 404 if missing
-    backup_vols = [v for v in svc.volumes if v.backup]
-    vol_paths = ", ".join(v.host_path for v in backup_vols) if backup_vols else "none"
-    return BackupResult(
-        service_name=service_name,
-        action="backup",
-        detail=f"Simulated backup of {len(backup_vols)} volume(s): {vol_paths}",
-    )
+@router.get("/paths")
+async def list_backup_paths(store: ContainerStore = Depends(get_store)) -> list[BackupPath]:
+    containers = store.list_all()
+    return get_all_backup_paths(containers, settings.homelab_repo_path)
 
 
-@router.post("/{service_name}/restore")
-async def restore_backup(
-    service_name: str,
-    store: ServiceStore = Depends(get_store),
-) -> BackupResult:
-    svc = store.get(service_name)  # raises 404 if missing
-    backup_vols = [v for v in svc.volumes if v.backup]
-    vol_paths = ", ".join(v.host_path for v in backup_vols) if backup_vols else "none"
-    return BackupResult(
-        service_name=service_name,
-        action="restore",
-        detail=f"Simulated restore of {len(backup_vols)} volume(s): {vol_paths}",
-    )
+# --- Manual paths ---
+
+
+@router.get("/manual")
+async def list_manual_paths() -> list[ManualBackupPath]:
+    return get_manual_paths(settings.homelab_repo_path)
+
+
+@router.post("/manual")
+async def add_manual_path(entry: ManualBackupPath) -> list[ManualBackupPath]:
+    paths = get_manual_paths(settings.homelab_repo_path)
+    # Prevent exact duplicate (same host + path)
+    if any(p.host == entry.host and p.path == entry.path for p in paths):
+        raise HTTPException(400, f"Manual path '{entry.path}' on host '{entry.host}' already exists")
+    paths.append(entry)
+    save_manual_paths(settings.homelab_repo_path, paths)
+    return paths
+
+
+@router.put("/manual/{index}")
+async def update_manual_path(index: int, entry: ManualBackupPath) -> list[ManualBackupPath]:
+    paths = get_manual_paths(settings.homelab_repo_path)
+    if index < 0 or index >= len(paths):
+        raise HTTPException(404, f"Manual path index {index} out of range")
+    paths[index] = entry
+    save_manual_paths(settings.homelab_repo_path, paths)
+    return paths
+
+
+@router.delete("/manual/{index}")
+async def delete_manual_path(index: int) -> list[ManualBackupPath]:
+    paths = get_manual_paths(settings.homelab_repo_path)
+    if index < 0 or index >= len(paths):
+        raise HTTPException(404, f"Manual path index {index} out of range")
+    paths.pop(index)
+    save_manual_paths(settings.homelab_repo_path, paths)
+    return paths

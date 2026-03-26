@@ -20,9 +20,19 @@ class VMStore:
         results = []
         for path in sorted(self.vms_dir.glob("*.yml")):
             data = yaml_service.read_yaml(path)
-            if data:
+            if data and data.get("name", "").strip():
                 results.append(VMDefinition(**data))
         return results
+
+    def delete_all(self) -> int:
+        """Delete all VM YAML files, including invalid ones. Returns count deleted."""
+        if not self.vms_dir.exists():
+            return 0
+        count = 0
+        for path in self.vms_dir.glob("*.yml"):
+            path.unlink()
+            count += 1
+        return count
 
     def get(self, name: str) -> VMDefinition:
         path = self._path(name)

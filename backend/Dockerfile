@@ -1,6 +1,19 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git unzip curl openssh-client pipx && rm -rf /var/lib/apt/lists/* && \
+    pipx install ansible-core && \
+    ln -s /root/.local/bin/ansible-playbook /usr/local/bin/ansible-playbook && \
+    ln -s /root/.local/bin/ansible /usr/local/bin/ansible && \
+    ln -s /root/.local/bin/ansible-galaxy /usr/local/bin/ansible-galaxy && \
+    ansible-galaxy collection install ansible.posix
+
+# Install Terraform (direct binary download)
+ARG TERRAFORM_VERSION=1.9.8
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" -o /tmp/terraform.zip && \
+    unzip /tmp/terraform.zip -d /usr/local/bin/ && \
+    rm /tmp/terraform.zip && \
+    terraform version
 
 WORKDIR /app
 

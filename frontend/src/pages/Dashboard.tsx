@@ -6,7 +6,7 @@ interface DashboardData {
   enabled_services: number
   total_vms: number
   enabled_vms: number
-  total_hypervisors: number
+  total_nodes: number
   hosts: string[]
   recent_commits: CommitInfo[]
 }
@@ -38,7 +38,7 @@ export default function Dashboard() {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
         <div style={cardStyle}>
-          <div style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Services</div>
+          <div style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Containers</div>
           <div style={{ color: '#e0e0e0', fontSize: '2rem', fontWeight: 700 }}>{data.enabled_services}</div>
           <div style={{ color: '#8890a0', fontSize: '0.8rem' }}>{data.total_services} total</div>
         </div>
@@ -48,8 +48,8 @@ export default function Dashboard() {
           <div style={{ color: '#8890a0', fontSize: '0.8rem' }}>{data.total_vms} total</div>
         </div>
         <div style={cardStyle}>
-          <div style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Hypervisors</div>
-          <div style={{ color: '#e0e0e0', fontSize: '2rem', fontWeight: 700 }}>{data.total_hypervisors}</div>
+          <div style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Nodes</div>
+          <div style={{ color: '#e0e0e0', fontSize: '2rem', fontWeight: 700 }}>{data.total_nodes}</div>
         </div>
         <div style={cardStyle}>
           <div style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Hosts</div>

@@ -12,10 +12,11 @@ dependencies = [
     "ruamel.yaml>=0.18,<1",
     "httpx>=0.28,<1",
     "cryptography>=44,<45",
+    "paramiko>=3.5,<4",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.24,<1",
     "ruff>=0.8,<1",

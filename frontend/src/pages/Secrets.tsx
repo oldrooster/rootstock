@@ -58,6 +58,10 @@ export default function Secrets() {
   const [newKey, setNewKey] = useState('')
   const [newValue, setNewValue] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  const [showGenSSH, setShowGenSSH] = useState(false)
+  const [sshKeyName, setSSHKeyName] = useState('')
+  const [generatedPubKey, setGeneratedPubKey] = useState<string | null>(null)
+  const [generating, setGenerating] = useState(false)
 
   useEffect(() => {
     const prefillKey = searchParams.get('key')
@@ -113,23 +117,91 @@ export default function Secrets() {
     }
   }
 
+  async function handleGenerateSSH() {
+    if (!sshKeyName.trim()) return
+    setGenerating(true)
+    try {
+      const r = await fetch('/api/secrets/generate-ssh-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key_name: sshKeyName }),
+      })
+      if (!r.ok) {
+        const data = await r.json().catch(() => null)
+        throw new Error(data?.detail || `HTTP ${r.status}`)
+      }
+      const data = await r.json()
+      setGeneratedPubKey(data.public_key)
+      loadKeys()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   if (loading) return <p style={{ color: '#8890a0' }}>Loading...</p>
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h1 style={{ color: '#e0e0e0', margin: 0 }}>Secrets</h1>
-        {!showAdd && (
-          <button style={btnPrimary} onClick={() => setShowAdd(true)}>
-            Add Secret
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          {!showGenSSH && (
+            <button style={btnSecondary} onClick={() => { setShowGenSSH(true); setGeneratedPubKey(null); setSSHKeyName('') }}>
+              Generate SSH Key
+            </button>
+          )}
+          {!showAdd && (
+            <button style={btnPrimary} onClick={() => setShowAdd(true)}>
+              Add Secret
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
         <div style={{ background: '#7f1d1d', color: '#fca5a5', padding: '0.5rem 0.75rem', borderRadius: '4px', marginBottom: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{error}</span>
           <button style={{ ...btnSecondary, border: 'none', color: '#fca5a5' }} onClick={() => setError(null)}>dismiss</button>
+        </div>
+      )}
+
+      {showGenSSH && (
+        <div style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', marginBottom: '0.75rem' }}>
+          <div style={{ marginBottom: '0.75rem' }}>
+            <label style={labelStyle}>Key Name</label>
+            <input style={{ ...inputStyle, maxWidth: '300px' }} value={sshKeyName}
+              onChange={e => setSSHKeyName(e.target.value)}
+              placeholder="deploy" />
+            <div style={{ color: '#8890a0', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+              Stored as: ssh/{sshKeyName || '...'}/private_key and ssh/{sshKeyName || '...'}/public_key
+            </div>
+          </div>
+
+          {generatedPubKey && (
+            <div style={{
+              background: '#166534', color: '#86efac', padding: '0.5rem 0.75rem',
+              borderRadius: '4px', marginBottom: '0.75rem', fontSize: '0.85rem',
+            }}>
+              <div style={{ marginBottom: '0.35rem', fontWeight: 600 }}>Public Key (copy this):</div>
+              <code style={{
+                fontFamily: 'monospace', fontSize: '0.8rem', wordBreak: 'break-all',
+                display: 'block', background: '#0f0f1a', color: '#86efac',
+                padding: '0.5rem', borderRadius: '4px', cursor: 'pointer',
+              }} onClick={() => navigator.clipboard.writeText(generatedPubKey)}>
+                {generatedPubKey}
+              </code>
+              <div style={{ color: '#86efac', fontSize: '0.7rem', marginTop: '0.25rem' }}>Click to copy</div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+            <button style={btnSecondary} onClick={() => { setShowGenSSH(false); setGeneratedPubKey(null) }}>Close</button>
+            <button style={btnPrimary} onClick={handleGenerateSSH} disabled={generating || !sshKeyName.trim()}>
+              {generating ? 'Generating...' : 'Generate'}
+            </button>
+          </div>
         </div>
       )}
 

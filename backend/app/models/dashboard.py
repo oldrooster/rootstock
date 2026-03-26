@@ -12,6 +12,6 @@ class DashboardData(BaseModel):
     enabled_services: int
     total_vms: int
     enabled_vms: int
-    total_hypervisors: int = 0
+    total_nodes: int = 0
     hosts: list[str]
     recent_commits: list[CommitInfo]
