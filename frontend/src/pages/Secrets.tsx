@@ -62,6 +62,7 @@ export default function Secrets() {
   const [sshKeyName, setSSHKeyName] = useState('')
   const [generatedPubKey, setGeneratedPubKey] = useState<string | null>(null)
   const [generating, setGenerating] = useState(false)
+  const [filter, setFilter] = useState('')
 
   useEffect(() => {
     const prefillKey = searchParams.get('key')
@@ -234,7 +235,13 @@ export default function Secrets() {
 
       {keys.length > 0 && (
         <div style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem' }}>
-          {keys.map(key => (
+          <input
+            style={{ ...inputStyle, marginBottom: '0.75rem' }}
+            placeholder="Filter secrets..."
+            value={filter}
+            onChange={e => setFilter(e.target.value)}
+          />
+          {keys.filter(k => !filter || k.toLowerCase().includes(filter.toLowerCase())).map(key => (
             <div key={key} style={{
               display: 'flex',
               justifyContent: 'space-between',

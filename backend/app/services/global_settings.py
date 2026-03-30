@@ -7,6 +7,9 @@ from app.services import yaml_service
 
 class GlobalSettings(BaseModel):
     docker_vols_base: str = "/var/docker_vols"
+    backup_target: str = "/mnt/share/backups"
+    backup_schedule: str = ""
+    role_order: list[str] = []
 
 
 def _path(repo_path: str) -> Path:

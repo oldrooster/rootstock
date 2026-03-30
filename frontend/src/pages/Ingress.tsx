@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 interface IngressRule {
   name: string
@@ -22,8 +23,11 @@ interface ManualRule {
 interface IngressSettings {
   wildcard_domain: string
   cloudflare_api_token_secret: string
+  cloudflare_account_id: string
   acme_email: string
   docker_network: string
+  tunnel_token_secret: string
+  tunnel_tokens: Record<string, string>
 }
 
 interface HostInfo {
@@ -73,7 +77,7 @@ const emptyManual: ManualRule = { name: '', hostname: '', backend: '', caddy_hos
 export default function Ingress() {
   const [rules, setRules] = useState<IngressRule[]>([])
   const [manualRules, setManualRules] = useState<ManualRule[]>([])
-  const [ingressSettings, setIngressSettings] = useState<IngressSettings>({ wildcard_domain: '', cloudflare_api_token_secret: '', acme_email: '', docker_network: 'backend' })
+  const [ingressSettings, setIngressSettings] = useState<IngressSettings>({ wildcard_domain: '', cloudflare_api_token_secret: '', cloudflare_account_id: '', acme_email: '', docker_network: 'backend', tunnel_token_secret: '', tunnel_tokens: {} })
   const [hosts, setHosts] = useState<HostInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -88,6 +92,7 @@ export default function Ingress() {
 
   // Settings dirty
   const [settingsDirty, setSettingsDirty] = useState(false)
+  useUnsavedChanges(settingsDirty || editingManual !== null)
 
   // Caddy management
   const [restartingHost, setRestartingHost] = useState<string | null>(null)
@@ -238,40 +243,53 @@ export default function Ingress() {
         {Object.keys(rulesByHost).length === 0 ? (
           <p style={{ color: '#8890a0', margin: 0 }}>No ingress rules found. Add containers with ingress or manual rules below.</p>
         ) : (
-          Object.entries(rulesByHost).sort(([a], [b]) => a.localeCompare(b)).map(([host, hostRules]) => (
-            <div key={host} style={{ marginBottom: '1rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                <h3 style={{ color: '#7c9ef8', fontSize: '0.9rem', margin: 0 }}>{host}</h3>
-                <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }} onClick={() => loadPreview('caddyfile', host)}>Caddyfile</button>
-                <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }} onClick={() => loadPreview('tunnel', host)}>Tunnel</button>
-                <button
-                  style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#22c55e', color: '#22c55e' }}
-                  onClick={() => openCaddyLogs(host)}
-                >Logs</button>
-                <button
-                  style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#f59e0b', color: '#f59e0b' }}
-                  onClick={() => restartCaddy(host)}
-                  disabled={restartingHost === host}
-                >{restartingHost === host ? 'Restarting...' : 'Restart'}</button>
-              </div>
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr style={{ borderBottom: '1px solid #2a2a3e' }}>
-                    <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Name</th>
-                    <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Hostname</th>
-                    <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Backend</th>
-                    <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Mode</th>
-                    <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>External</th>
-                    <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Source</th>
-                    <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Status</th>
+          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+            <colgroup>
+              <col style={{ width: '14%' }} />
+              <col style={{ width: '20%' }} />
+              <col style={{ width: '22%' }} />
+              <col style={{ width: '10%' }} />
+              <col style={{ width: '10%' }} />
+              <col style={{ width: '10%' }} />
+              <col style={{ width: '10%' }} />
+            </colgroup>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #2a2a3e' }}>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Name</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Hostname</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Backend</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Mode</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>External</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Source</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(rulesByHost).sort(([a], [b]) => a.localeCompare(b)).map(([host, hostRules]) => (
+                <Fragment key={host}>
+                  <tr>
+                    <td colSpan={7} style={{ padding: '0.75rem 0.75rem 0.3rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ color: '#7c9ef8', fontSize: '0.9rem', fontWeight: 600 }}>{host}</span>
+                        <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }} onClick={() => loadPreview('caddyfile', host)}>Caddyfile</button>
+                        <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }} onClick={() => loadPreview('tunnel', host)}>Tunnel</button>
+                        <button
+                          style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#22c55e', color: '#22c55e' }}
+                          onClick={() => openCaddyLogs(host)}
+                        >Logs</button>
+                        <button
+                          style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#f59e0b', color: '#f59e0b' }}
+                          onClick={() => restartCaddy(host)}
+                          disabled={restartingHost === host}
+                        >{restartingHost === host ? 'Restarting...' : 'Restart'}</button>
+                      </div>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
                   {hostRules.map((r, i) => (
-                    <tr key={`${r.name}-${i}`} style={{ borderBottom: '1px solid #1a1a2e' }}>
+                    <tr key={`${host}-${r.name}-${i}`} style={{ borderBottom: '1px solid #1a1a2e' }}>
                       <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontWeight: 600 }}>{r.name}</td>
-                      <td style={{ color: '#7c9ef8', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>{r.hostname}</td>
-                      <td style={{ color: '#b0b8d0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontFamily: 'monospace' }}>{r.backend}</td>
+                      <td style={{ color: '#7c9ef8', padding: '0.4rem 0.75rem', fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.hostname}</td>
+                      <td style={{ color: '#b0b8d0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.backend}</td>
                       <td style={{ padding: '0.4rem 0.75rem' }}>
                         <span style={{
                           fontSize: '0.7rem', padding: '0.1rem 0.4rem', borderRadius: '9999px',
@@ -298,10 +316,10 @@ export default function Ingress() {
                       </td>
                     </tr>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          ))
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 
@@ -494,6 +512,15 @@ export default function Ingress() {
             />
           </div>
           <div>
+            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Cloudflare Account ID</label>
+            <input
+              style={inputStyle}
+              placeholder="auto-detected from API token"
+              value={ingressSettings.cloudflare_account_id}
+              onChange={e => { setIngressSettings({ ...ingressSettings, cloudflare_account_id: e.target.value }); setSettingsDirty(true) }}
+            />
+          </div>
+          <div>
             <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Docker Network</label>
             <input
               style={inputStyle}
@@ -503,6 +530,52 @@ export default function Ingress() {
             />
           </div>
         </div>
+
+        {/* Tunnel Token Overrides — collapsed by default, only needed for manual tunnel management */}
+        {(() => {
+          const hasOverrides = ingressSettings.tunnel_token_secret || Object.keys(ingressSettings.tunnel_tokens || {}).length > 0
+          const externalHosts = [...new Set([
+            ...rules.filter(r => r.external).map(r => r.caddy_host),
+            ...manualRules.filter(r => r.external).map(r => r.caddy_host),
+          ])].filter(Boolean).sort()
+          if (!hasOverrides && externalHosts.length === 0) return null
+          return (
+            <details style={{ marginTop: '1rem' }}>
+              <summary style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', cursor: 'pointer', userSelect: 'none' }}>
+                Tunnel Token Overrides
+                <span style={{ fontWeight: 400, textTransform: 'none', marginLeft: '0.5rem' }}>
+                  (optional -- tunnels are auto-provisioned when a CF API token is set)
+                </span>
+              </summary>
+              <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.35rem 0.75rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                <span style={{ color: '#8890a0', fontSize: '0.8rem' }}>Default</span>
+                <input
+                  style={inputStyle}
+                  placeholder="leave empty for auto-provisioning"
+                  value={ingressSettings.tunnel_token_secret}
+                  onChange={e => { setIngressSettings({ ...ingressSettings, tunnel_token_secret: e.target.value }); setSettingsDirty(true) }}
+                />
+                {externalHosts.map(host => (
+                  <Fragment key={host}>
+                    <span style={{ color: '#e0e0e0', fontSize: '0.8rem' }}>{host}</span>
+                    <input
+                      style={inputStyle}
+                      placeholder="auto-provisioned"
+                      value={(ingressSettings.tunnel_tokens || {})[host] || ''}
+                      onChange={e => {
+                        const tokens = { ...(ingressSettings.tunnel_tokens || {}) }
+                        if (e.target.value) tokens[host] = e.target.value
+                        else delete tokens[host]
+                        setIngressSettings({ ...ingressSettings, tunnel_tokens: tokens })
+                        setSettingsDirty(true)
+                      }}
+                    />
+                  </Fragment>
+                ))}
+              </div>
+            </details>
+          )
+        })()}
       </div>
     </div>
   )

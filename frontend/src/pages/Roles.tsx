@@ -516,6 +516,7 @@ function AssignmentMatrix({ onBack }: { onBack: () => void }) {
 
 export default function Roles() {
   const [roles, setRoles] = useState<Role[]>([])
+  const [roleOrder, setRoleOrder] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
@@ -528,14 +529,40 @@ export default function Roles() {
   const [editorRole, setEditorRole] = useState<string | null>(null)
 
   function loadRoles() {
-    fetch('/api/roles/')
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-      .then(setRoles)
+    Promise.all([
+      fetch('/api/roles/').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
+      fetch('/api/roles/order').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
+    ])
+      .then(([r, o]) => { setRoles(r); setRoleOrder(o) })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }
 
   useEffect(() => { loadRoles() }, [])
+
+  async function saveOrder(newOrder: string[]) {
+    setRoleOrder(newOrder)
+    try {
+      const r = await fetch('/api/roles/order', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: newOrder }),
+      })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  function moveRole(name: string, direction: -1 | 1) {
+    const idx = roleOrder.indexOf(name)
+    if (idx < 0) return
+    const newIdx = idx + direction
+    if (newIdx < 0 || newIdx >= roleOrder.length) return
+    const next = [...roleOrder]
+    ;[next[idx], next[newIdx]] = [next[newIdx], next[idx]]
+    saveOrder(next)
+  }
 
   async function handleCreate() {
     try {
@@ -643,8 +670,45 @@ export default function Roles() {
         <p style={{ color: '#8890a0' }}>No roles defined yet.</p>
       )}
 
-      {roles.map(role => (
-        <div key={role.name} style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', marginBottom: '0.75rem' }}>
+      {roleOrder.length > 0 && (
+        <div style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '0.5rem' }}>
+          Execution Order (top runs first)
+        </div>
+      )}
+
+      {/* Roles ordered by execution order */}
+      {roleOrder.map((name, idx) => {
+        const role = roles.find(r => r.name === name)
+        if (!role) return null
+        return (
+        <div key={role.name} style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', marginBottom: '0.75rem', display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
+          {/* Order controls */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', flexShrink: 0, paddingTop: '0.1rem' }}>
+            <button
+              style={{
+                background: 'transparent', border: '1px solid #2a2a3e', color: idx === 0 ? '#333' : '#8890a0',
+                borderRadius: '3px', width: '1.5rem', height: '1.3rem', cursor: idx === 0 ? 'default' : 'pointer',
+                fontSize: '0.7rem', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+              }}
+              onClick={() => moveRole(role.name, -1)}
+              disabled={idx === 0}
+              title="Move up (run earlier)"
+            >{'\u25B2'}</button>
+            <span style={{ color: '#555', fontSize: '0.7rem', textAlign: 'center', lineHeight: 1 }}>{idx + 1}</span>
+            <button
+              style={{
+                background: 'transparent', border: '1px solid #2a2a3e', color: idx === roleOrder.length - 1 ? '#333' : '#8890a0',
+                borderRadius: '3px', width: '1.5rem', height: '1.3rem', cursor: idx === roleOrder.length - 1 ? 'default' : 'pointer',
+                fontSize: '0.7rem', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+              }}
+              onClick={() => moveRole(role.name, 1)}
+              disabled={idx === roleOrder.length - 1}
+              title="Move down (run later)"
+            >{'\u25BC'}</button>
+          </div>
+
+          {/* Role content */}
+          <div style={{ flex: 1, minWidth: 0 }}>
           {editingName === role.name ? (
             <div>
               <div style={{ marginBottom: '0.75rem' }}>
@@ -686,8 +750,10 @@ export default function Roles() {
               </div>
             </div>
           )}
+          </div>
         </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 interface DNSRecord {
   hostname: string
   ip: string
-  source: 'container' | 'static'
+  source: 'container' | 'static' | 'ingress'
   description: string
   host: string
 }
@@ -115,7 +115,7 @@ export default function DNS() {
   const [containerPage, setContainerPage] = useState(0)
   const [staticPage, setStaticPage] = useState(0)
 
-  const containerRecords = useMemo(() => records.filter(r => r.source === 'container'), [records])
+  const containerRecords = useMemo(() => records.filter(r => r.source === 'container' || r.source === 'ingress'), [records])
   const containerTotalPages = Math.max(1, Math.ceil(containerRecords.length / PAGE_SIZE))
   const containerSlice = containerRecords.slice(containerPage * PAGE_SIZE, (containerPage + 1) * PAGE_SIZE)
 
@@ -236,16 +236,16 @@ export default function DNS() {
         </div>
       )}
 
-      {/* Container-derived Records */}
+      {/* Derived Records (containers + ingress) */}
       <div style={cardStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
           <h2 style={{ color: '#e0e0e0', fontSize: '1rem', margin: 0 }}>
-            Container Records
+            Derived Records
             <span style={{ color: '#8890a0', fontWeight: 400, fontSize: '0.8rem', marginLeft: '0.5rem' }}>({containerRecords.length})</span>
           </h2>
         </div>
         {containerRecords.length === 0 ? (
-          <p style={{ color: '#8890a0', margin: 0 }}>No container-derived DNS records. Add containers with DNS names to generate records.</p>
+          <p style={{ color: '#8890a0', margin: 0 }}>No derived DNS records. Add containers with DNS names or ingress proxy rules to generate records.</p>
         ) : (
           <>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -253,6 +253,7 @@ export default function DNS() {
                 <tr style={{ borderBottom: '1px solid #2a2a3e' }}>
                   <th style={thStyle}>Hostname</th>
                   <th style={thStyle}>IP</th>
+                  <th style={thStyle}>Source</th>
                   <th style={thStyle}>Host</th>
                   <th style={thStyle}>Description</th>
                 </tr>
@@ -262,6 +263,13 @@ export default function DNS() {
                   <tr key={`${r.hostname}-${r.ip}-${i}`} style={{ borderBottom: '1px solid #1f1f35' }}>
                     <td style={{ ...tdStyle, color: '#e0e0e0' }}>{r.hostname}</td>
                     <td style={{ ...tdStyle, color: '#b0b8d0', fontFamily: 'monospace' }}>{r.ip}</td>
+                    <td style={tdStyle}>
+                      <span style={{
+                        fontSize: '0.7rem', padding: '0.1rem 0.4rem', borderRadius: '9999px',
+                        background: r.source === 'ingress' ? 'rgba(245,158,11,0.15)' : 'rgba(124,158,248,0.15)',
+                        color: r.source === 'ingress' ? '#f59e0b' : '#7c9ef8',
+                      }}>{r.source}</span>
+                    </td>
                     <td style={{ ...tdStyle, color: '#8890a0' }}>{r.host || '—'}</td>
                     <td style={{ ...tdStyle, color: '#8890a0' }}>{r.description || '—'}</td>
                   </tr>

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import py_compile; py_compile.compile\\(''backend/app/routers/settings_router.py'', doraise=True\\)\")",
+      "Bash(python3 -c \":*)",
+      "Bash(python3 -c \"import py_compile; py_compile.compile\\(''backend/app/routers/backups.py'', doraise=True\\)\")",
+      "Bash(find /home/guybrush/rootstock -path */roles/* -name *caddy* -o -path */roles/* -name *cloudflare* -o -path */roles/* -name *ingress*)",
+      "Bash(grep -r \"httpx\\\\|requests\" backend/requirements*.txt backend/pyproject.toml)",
+      "Bash(pip3 list:*)",
+      "Bash(grep -r \"export\" /home/guybrush/rootstock/backend/app/routers/*.py)",
+      "Bash(done)",
+      "Bash(wc -l /home/guybrush/rootstock/backend/app/services/*.py)"
+    ]
+  }
+}

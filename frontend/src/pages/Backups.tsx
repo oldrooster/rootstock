@@ -1,10 +1,48 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+function describeCron(expr: string): string {
+  if (!expr.trim()) return ''
+  const parts = expr.trim().split(/\s+/)
+  if (parts.length !== 5) return expr
+
+  const [min, hour, dom, mon, dow] = parts
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+  const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+  let time = ''
+  if (hour !== '*' && min !== '*') {
+    const h = parseInt(hour)
+    const m = parseInt(min)
+    const ampm = h >= 12 ? 'pm' : 'am'
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h
+    time = m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, '0')}${ampm}`
+  } else if (hour !== '*') {
+    const h = parseInt(hour)
+    const ampm = h >= 12 ? 'pm' : 'am'
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h
+    time = `${h12}${ampm}`
+  } else {
+    time = 'every minute'
+  }
+
+  if (dom === '*' && mon === '*' && dow === '*') return `${time} every day`
+  if (dom === '*' && mon === '*' && dow !== '*') {
+    const dayNames = dow.split(',').map(d => { const n = parseInt(d); return isNaN(n) ? d : (DAYS[n] || d) })
+    return dayNames.length === 1 ? `${time} every ${dayNames[0]}` : `${time} on ${dayNames.join(', ')}`
+  }
+  if (dom !== '*' && mon === '*' && dow === '*') return `${time} on day ${dom} of every month`
+  if (dom !== '*' && mon !== '*') { const monthName = MONTHS[parseInt(mon)] || mon; return `${time} on ${monthName} ${dom}` }
+  if (min.startsWith('*/')) return `every ${min.slice(2)} minutes`
+  if (hour.startsWith('*/')) return `every ${hour.slice(2)} hours`
+  return expr
+}
 
 interface BackupPath {
   host: string
   path: string
   source: 'container' | 'manual'
   description: string
+  exclusions: string[]
 }
 
 interface ManualBackupPath {
@@ -13,10 +51,39 @@ interface ManualBackupPath {
   description: string
 }
 
+interface PathStat {
+  host: string
+  path: string
+  slug: string
+  size_bytes: number
+  backup_sets: number
+}
+
+interface StatsResponse {
+  updated_at: number
+  stats: PathStat[]
+}
+
 interface HostInfo {
   name: string
   type: string
   status: string
+}
+
+interface BackupSettings {
+  backup_target: string
+  backup_schedule: string
+}
+
+interface SnapshotInfo {
+  slug: string
+  dates: string[]
+}
+
+interface StepMsg {
+  step: string
+  status: string
+  detail: string
 }
 
 const cardStyle: React.CSSProperties = {
@@ -51,8 +118,63 @@ const btnStyle: React.CSSProperties = {
 const btnPrimary: React.CSSProperties = { ...btnStyle, background: '#7c9ef8', color: '#0f0f1a' }
 const btnDanger: React.CSSProperties = { ...btnStyle, background: '#f87171', color: '#0f0f1a' }
 const btnSecondary: React.CSSProperties = { ...btnStyle, background: '#2a2a3e', color: '#e0e0e0' }
+const btnSuccess: React.CSSProperties = { ...btnStyle, background: '#22c55e', color: '#0f0f1a' }
+const btnAmber: React.CSSProperties = { ...btnStyle, background: '#f59e0b', color: '#0f0f1a' }
+
+const labelStyle: React.CSSProperties = {
+  color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase',
+  display: 'block', marginBottom: '0.25rem',
+}
 
 const emptyManual: ManualBackupPath = { host: '', path: '', description: '' }
+
+/* ── Step Progress Renderer ────────────────────────────────────── */
+
+function StepList({ steps }: { steps: StepMsg[] }) {
+  const endRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [steps])
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '400px', overflowY: 'auto' }}>
+      {steps.map((s, i) => (
+        <div key={i} style={{
+          display: 'flex', alignItems: 'flex-start', gap: '0.5rem',
+          padding: '0.4rem 0.6rem', background: '#0f0f1a', borderRadius: '4px',
+          border: '1px solid #2a2a3e',
+        }}>
+          <span style={{
+            flexShrink: 0, width: '1.2rem', textAlign: 'center', fontSize: '0.85rem',
+            color: s.status === 'done' ? '#22c55e'
+              : s.status === 'error' ? '#ef4444'
+              : s.status === 'running' ? '#f59e0b'
+              : '#8890a0',
+          }}>
+            {s.status === 'done' ? '\u2713'
+              : s.status === 'error' ? '\u2717'
+              : s.status === 'running' ? '\u25CB'
+              : '\u00B7'}
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              color: '#e0e0e0', fontSize: '0.85rem', fontWeight: 600,
+              textTransform: 'capitalize',
+            }}>{s.step.replace(/^(host|vol):/, '')}</div>
+            {s.detail && (
+              <div style={{
+                color: '#8890a0', fontSize: '0.8rem', marginTop: '0.1rem',
+                fontFamily: s.detail.includes('%') ? 'monospace' : 'inherit',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+              }}>{s.detail}</div>
+            )}
+          </div>
+        </div>
+      ))}
+      <div ref={endRef} />
+    </div>
+  )
+}
+
+/* ── Main Page ─────────────────────────────────────────────────── */
 
 export default function Backups() {
   const [paths, setPaths] = useState<BackupPath[]>([])
@@ -60,11 +182,103 @@ export default function Backups() {
   const [hosts, setHosts] = useState<HostInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [backupSettings, setBackupSettings] = useState<BackupSettings>({ backup_target: '', backup_schedule: '' })
 
   // Manual form
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [manualForm, setManualForm] = useState<ManualBackupPath>({ ...emptyManual })
   const [manualError, setManualError] = useState<string | null>(null)
+
+  // Backup Now dialog
+  const [showBackup, setShowBackup] = useState(false)
+  const [backupSelection, setBackupSelection] = useState<Set<string>>(new Set())
+  const [backupRunning, setBackupRunning] = useState(false)
+  const [backupSteps, setBackupSteps] = useState<StepMsg[]>([])
+  const backupWsRef = useRef<WebSocket | null>(null)
+
+  // Restore dialog
+  const [showRestore, setShowRestore] = useState(false)
+  const [restoreHost, setRestoreHost] = useState('')
+  const [restoreSnapshots, setRestoreSnapshots] = useState<SnapshotInfo[]>([])
+  const [restoreDate, setRestoreDate] = useState('')
+  const [restoreSelection, setRestoreSelection] = useState<Set<string>>(new Set())
+  const [restoreTargetHost, setRestoreTargetHost] = useState('')
+  const [restoreRunning, setRestoreRunning] = useState(false)
+  const [restoreSteps, setRestoreSteps] = useState<StepMsg[]>([])
+  const [loadingSnapshots, setLoadingSnapshots] = useState(false)
+  const restoreWsRef = useRef<WebSocket | null>(null)
+
+  // Stats
+  const [stats, setStats] = useState<PathStat[]>([])
+  const [statsUpdatedAt, setStatsUpdatedAt] = useState<number>(0)
+  const [statsLoading, setStatsLoading] = useState(false)
+
+  // Export/Import
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const importFileRef = useRef<HTMLInputElement>(null)
+
+  const fetchStats = useCallback((refresh = false) => {
+    setStatsLoading(true)
+    fetch(`/api/backups/stats${refresh ? '?refresh=true' : ''}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then((data: StatsResponse) => {
+        setStats(data.stats)
+        setStatsUpdatedAt(data.updated_at)
+      })
+      .catch(e => console.error('Failed to load stats:', e))
+      .finally(() => setStatsLoading(false))
+  }, [])
+
+  const formatBytes = (bytes: number): string => {
+    if (bytes === 0) return '\u2014'
+    const units = ['B', 'KB', 'MB', 'GB', 'TB']
+    const i = Math.floor(Math.log(bytes) / Math.log(1024))
+    const val = bytes / Math.pow(1024, i)
+    return `${val < 10 ? val.toFixed(1) : Math.round(val)} ${units[i]}`
+  }
+
+  const getStatForPath = (host: string, path: string): PathStat | undefined => {
+    return stats.find(s => s.host === host && s.path === path)
+  }
+
+  const exportSettings = useCallback(() => {
+    fetch('/api/settings/export')
+      .then(r => r.json())
+      .then(data => {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `rootstock-export-${new Date().toISOString().slice(0, 10)}.json`
+        a.click()
+        URL.revokeObjectURL(url)
+      })
+      .catch(e => setError(e.message))
+  }, [])
+
+  const importSettings = useCallback((file: File) => {
+    setImporting(true)
+    setImportResult(null)
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = reader.result as string
+      let parsed: unknown
+      try { parsed = JSON.parse(text) } catch { setImportResult({ ok: false, msg: 'Invalid JSON file' }); setImporting(false); return }
+      fetch('/api/settings/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) })
+      .then(r => {
+        if (!r.ok) return r.json().then(d => { throw new Error(d.detail || `HTTP ${r.status}`) })
+        return r.json()
+      })
+      .then(() => {
+        setImportResult({ ok: true, msg: 'Settings imported successfully' })
+        fetchAll()
+      })
+      .catch(e => setImportResult({ ok: false, msg: e.message }))
+      .finally(() => setImporting(false))
+    }
+    reader.readAsText(file)
+  }, [])
 
   const fetchAll = () => {
     setLoading(true)
@@ -72,17 +286,22 @@ export default function Backups() {
       fetch('/api/backups/paths').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
       fetch('/api/backups/manual').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
       fetch('/api/hosts/').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
+      fetch('/api/settings/').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
     ])
-      .then(([p, m, h]) => {
+      .then(([p, m, h, s]) => {
         setPaths(p)
         setManualPaths(m)
         setHosts(h)
+        setBackupSettings({
+          backup_target: s.global_settings?.backup_target || '',
+          backup_schedule: s.global_settings?.backup_schedule || '',
+        })
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }
 
-  useEffect(() => { fetchAll() }, [])
+  useEffect(() => { fetchAll(); fetchStats() }, [])
 
   // Group paths by host
   const pathsByHost: Record<string, BackupPath[]> = {}
@@ -104,7 +323,6 @@ export default function Backups() {
         setManualPaths(list)
         setEditingIndex(null)
         setManualForm({ ...emptyManual })
-        // Refresh all paths
         fetch('/api/backups/paths').then(r => r.json()).then(setPaths)
       })
       .catch(e => setManualError(e.message))
@@ -123,6 +341,179 @@ export default function Backups() {
       .catch(e => setManualError(e.message))
   }
 
+  /* ── Backup Now ─────────────────────────────────────────── */
+
+  function openBackupDialog() {
+    // Pre-select all volumes
+    const all = new Set(paths.map(p => `${p.host}:${p.path}`))
+    setBackupSelection(all)
+    setBackupSteps([])
+    setBackupRunning(false)
+    setShowBackup(true)
+  }
+
+  function toggleBackupVol(key: string) {
+    setBackupSelection(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function startBackup() {
+    if (backupSelection.size === 0) return
+    setBackupRunning(true)
+    setBackupSteps([])
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const params = new URLSearchParams()
+    params.set('volumes', Array.from(backupSelection).join(','))
+    const ws = new WebSocket(`${protocol}//${window.location.host}/api/backups/run?${params}`)
+    backupWsRef.current = ws
+
+    ws.onmessage = (e) => {
+      try {
+        const step = JSON.parse(e.data) as StepMsg
+        setBackupSteps(prev => {
+          const idx = prev.findIndex(s => s.step === step.step)
+          if (idx >= 0) { const u = [...prev]; u[idx] = step; return u }
+          return [...prev, step]
+        })
+      } catch { /* ignore */ }
+    }
+
+    ws.onclose = () => {
+      setBackupRunning(false)
+    }
+  }
+
+  function closeBackupDialog() {
+    if (backupWsRef.current) { backupWsRef.current.close(); backupWsRef.current = null }
+    setShowBackup(false)
+    setBackupSteps([])
+    setBackupRunning(false)
+  }
+
+  /* ── Restore ────────────────────────────────────────────── */
+
+  function openRestoreDialog() {
+    setRestoreHost('')
+    setRestoreSnapshots([])
+    setRestoreDate('')
+    setRestoreSelection(new Set())
+    setRestoreTargetHost('')
+    setRestoreSteps([])
+    setRestoreRunning(false)
+    setShowRestore(true)
+  }
+
+  async function loadSnapshots(hostName: string) {
+    setRestoreHost(hostName)
+    setRestoreDate('')
+    setRestoreSelection(new Set())
+    setRestoreSnapshots([])
+    setLoadingSnapshots(true)
+    try {
+      const r = await fetch(`/api/backups/snapshots/${encodeURIComponent(hostName)}`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data = await r.json()
+      setRestoreSnapshots(data)
+    } catch {
+      setRestoreSnapshots([])
+    } finally {
+      setLoadingSnapshots(false)
+    }
+  }
+
+  // Reverse-lookup: slug -> original path
+  function slugToPath(slug: string): string {
+    for (const p of paths) {
+      if (p.host === restoreHost) {
+        const s = p.path.replace(/^\//, '').replace(/[^a-zA-Z0-9_.-]/g, '_')
+        if (s === slug) return p.path
+      }
+    }
+    return slug // fallback
+  }
+
+  // Collect all unique dates across all snapshots for a host
+  const allRestoreDates: string[] = (() => {
+    const dates = new Set<string>()
+    for (const s of restoreSnapshots) {
+      for (const d of s.dates) dates.add(d)
+    }
+    return [...dates].sort().reverse()
+  })()
+
+  // Volumes available for the selected date
+  const restoreVolumesForDate: { slug: string; path: string }[] = (() => {
+    if (!restoreDate) return []
+    return restoreSnapshots
+      .filter(s => s.dates.includes(restoreDate))
+      .map(s => ({ slug: s.slug, path: slugToPath(s.slug) }))
+  })()
+
+  function selectRestoreDate(date: string) {
+    setRestoreDate(date)
+    // Pre-select all volumes for this date
+    const vols = restoreSnapshots
+      .filter(s => s.dates.includes(date))
+      .map(s => slugToPath(s.slug))
+    setRestoreSelection(new Set(vols))
+  }
+
+  function toggleRestoreVol(path: string) {
+    setRestoreSelection(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  function startRestore() {
+    if (!restoreHost || !restoreDate || restoreSelection.size === 0) return
+    setRestoreRunning(true)
+    setRestoreSteps([])
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const params = new URLSearchParams({
+      host: restoreHost,
+      paths: Array.from(restoreSelection).join(','),
+      snapshot: restoreDate,
+    })
+    if (restoreTargetHost && restoreTargetHost !== restoreHost) {
+      params.set('target_host', restoreTargetHost)
+    }
+    const ws = new WebSocket(`${protocol}//${window.location.host}/api/backups/restore?${params}`)
+    restoreWsRef.current = ws
+
+    ws.onmessage = (e) => {
+      try {
+        const step = JSON.parse(e.data) as StepMsg
+        setRestoreSteps(prev => {
+          const idx = prev.findIndex(s => s.step === step.step)
+          if (idx >= 0) { const u = [...prev]; u[idx] = step; return u }
+          return [...prev, step]
+        })
+      } catch { /* ignore */ }
+    }
+
+    ws.onclose = () => {
+      setRestoreRunning(false)
+    }
+  }
+
+  function closeRestoreDialog() {
+    if (restoreWsRef.current) { restoreWsRef.current.close(); restoreWsRef.current = null }
+    setShowRestore(false)
+    setRestoreSteps([])
+    setRestoreRunning(false)
+  }
+
+  /* ── Render ─────────────────────────────────────────────── */
+
   if (error) return <p style={{ color: '#f87171' }}>Error: {error}</p>
   if (loading) return <p style={{ color: '#8890a0' }}>Loading...</p>
 
@@ -131,17 +522,80 @@ export default function Backups() {
 
   return (
     <div>
-      <h1 style={{ color: '#e0e0e0', marginBottom: '1rem' }}>Backups</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <h1 style={{ color: '#e0e0e0', margin: 0 }}>Backups</h1>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <button style={btnSecondary} onClick={exportSettings}>Export</button>
+          <button style={btnSecondary} onClick={() => importFileRef.current?.click()} disabled={importing}>
+            {importing ? 'Importing...' : 'Import'}
+          </button>
+          <input ref={importFileRef} type="file" accept=".json" style={{ display: 'none' }}
+            onChange={e => { if (e.target.files?.[0]) { importSettings(e.target.files[0]); e.target.value = '' } }} />
+          <div style={{ width: '1px', height: '1.5rem', background: '#2a2a3e' }} />
+          <button style={btnSuccess} onClick={openBackupDialog} disabled={paths.length === 0}>Backup Now</button>
+          <button style={btnAmber} onClick={openRestoreDialog}>Restore</button>
+        </div>
+      </div>
+
+      {importResult && (
+        <div style={{
+          padding: '0.5rem 1rem', borderRadius: '4px', marginBottom: '0.75rem', fontSize: '0.85rem',
+          background: importResult.ok ? 'rgba(34,197,94,0.1)' : 'rgba(248,113,113,0.1)',
+          border: `1px solid ${importResult.ok ? 'rgba(34,197,94,0.3)' : 'rgba(248,113,113,0.3)'}`,
+          color: importResult.ok ? '#86efac' : '#fca5a5',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <span>{importResult.msg}</span>
+          <button style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1rem' }}
+            onClick={() => setImportResult(null)}>&times;</button>
+        </div>
+      )}
+
+      {/* Settings summary */}
+      <div style={{ ...cardStyle, display: 'flex', gap: '2rem', alignItems: 'center', padding: '0.75rem 1.25rem', flexWrap: 'wrap' }}>
+        <div>
+          <span style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase' }}>Target: </span>
+          <span style={{ color: '#e0e0e0', fontSize: '0.85rem', fontFamily: 'monospace' }}>
+            {backupSettings.backup_target || <span style={{ color: '#f87171' }}>not configured</span>}
+          </span>
+        </div>
+        <div>
+          <span style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase' }}>Schedule: </span>
+          {backupSettings.backup_schedule
+            ? <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{describeCron(backupSettings.backup_schedule)}</span>
+            : <span style={{ color: '#6b7280', fontSize: '0.85rem' }}>not set</span>
+          }
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          {statsUpdatedAt > 0 && (
+            <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>
+              Stats: {new Date(statsUpdatedAt * 1000).toLocaleString()}
+            </span>
+          )}
+          <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+            onClick={() => fetchStats(true)} disabled={statsLoading}>
+            {statsLoading ? 'Calculating...' : 'Refresh Stats'}
+          </button>
+        </div>
+      </div>
 
       {/* Summary cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
-        {sortedHosts.map(([host, hostPaths]) => (
+        {sortedHosts.map(([host, hostPaths]) => {
+          const hostTotal = stats
+            .filter(s => s.host === host)
+            .reduce((sum, s) => sum + s.size_bytes, 0)
+          return (
           <div key={host} style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', textAlign: 'center' }}>
             <div style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', marginBottom: '0.35rem' }}>{host}</div>
             <div style={{ color: '#e0e0e0', fontSize: '1.5rem', fontWeight: 700 }}>{hostPaths.length}</div>
             <div style={{ color: '#8890a0', fontSize: '0.75rem' }}>volume{hostPaths.length !== 1 ? 's' : ''}</div>
+            {hostTotal > 0 && (
+              <div style={{ color: '#6b7280', fontSize: '0.7rem', marginTop: '0.25rem' }}>{formatBytes(hostTotal)}</div>
+            )}
           </div>
-        ))}
+          )
+        })}
         {sortedHosts.length === 0 && (
           <div style={{ ...cardStyle, gridColumn: '1 / -1' }}>
             <p style={{ color: '#8890a0', margin: 0 }}>No backup paths found. Add volumes with backup enabled to containers, or add manual paths below.</p>
@@ -159,10 +613,15 @@ export default function Backups() {
                 <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Path</th>
                 <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Source</th>
                 <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Description</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Exclusions</th>
+                <th style={{ textAlign: 'right', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Size</th>
+                <th style={{ textAlign: 'right', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Sets</th>
               </tr>
             </thead>
             <tbody>
-              {hostPaths.map((p, i) => (
+              {hostPaths.map((p, i) => {
+                const stat = getStatForPath(p.host, p.path)
+                return (
                 <tr key={`${p.path}-${i}`} style={{ borderBottom: '1px solid #1a1a2e' }}>
                   <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontFamily: 'monospace' }}>{p.path}</td>
                   <td style={{ padding: '0.4rem 0.75rem' }}>
@@ -172,9 +631,27 @@ export default function Backups() {
                       color: p.source === 'container' ? '#7c9ef8' : '#8890a0',
                     }}>{p.source}</span>
                   </td>
-                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>{p.description || '—'}</td>
+                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>{p.description || '\u2014'}</td>
+                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontFamily: 'monospace' }}>
+                    {p.exclusions && p.exclusions.length > 0
+                      ? p.exclusions.map((e, j) => (
+                          <span key={j} style={{
+                            fontSize: '0.7rem', padding: '0.1rem 0.4rem', borderRadius: '9999px',
+                            background: 'rgba(248,113,113,0.1)', color: '#fca5a5',
+                            marginRight: '0.25rem', display: 'inline-block', marginBottom: '0.15rem',
+                          }}>{e}</span>
+                        ))
+                      : '\u2014'}
+                  </td>
+                  <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', textAlign: 'right', fontFamily: 'monospace' }}>
+                    {stat ? formatBytes(stat.size_bytes) : '\u2014'}
+                  </td>
+                  <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', textAlign: 'right' }}>
+                    {stat ? (stat.backup_sets > 0 ? stat.backup_sets : '\u2014') : '\u2014'}
+                  </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -188,7 +665,7 @@ export default function Backups() {
         {/* Form */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr 1fr auto', gap: '0.5rem', marginBottom: '1rem', alignItems: 'end' }}>
           <div>
-            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Host</label>
+            <label style={labelStyle}>Host</label>
             <select
               style={selectStyle}
               value={manualForm.host}
@@ -199,7 +676,7 @@ export default function Backups() {
             </select>
           </div>
           <div>
-            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Path</label>
+            <label style={labelStyle}>Path</label>
             <input
               style={inputStyle}
               placeholder="/home/pi/scripts"
@@ -208,7 +685,7 @@ export default function Backups() {
             />
           </div>
           <div>
-            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Description</label>
+            <label style={labelStyle}>Description</label>
             <input
               style={inputStyle}
               placeholder="optional"
@@ -246,7 +723,7 @@ export default function Backups() {
                 <tr key={i} style={{ borderBottom: '1px solid #1a1a2e' }}>
                   <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>{p.host}</td>
                   <td style={{ color: '#b0b8d0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontFamily: 'monospace' }}>{p.path}</td>
-                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>{p.description || '—'}</td>
+                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>{p.description || '\u2014'}</td>
                   <td style={{ textAlign: 'right', padding: '0.4rem 0.75rem' }}>
                     <button
                       style={{ ...btnSecondary, marginRight: '0.35rem', fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
@@ -263,6 +740,200 @@ export default function Backups() {
           </table>
         )}
       </div>
+
+      {/* ── Backup Now Dialog ──────────────────────────────── */}
+      {showBackup && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000,
+        }} onClick={(e) => { if (e.target === e.currentTarget && !backupRunning) closeBackupDialog() }}>
+          <div style={{ background: '#1a1a2e', borderRadius: '8px', padding: '1.5rem', width: '600px', maxHeight: '80vh', overflowY: 'auto' }}>
+            <h2 style={{ color: '#e0e0e0', margin: '0 0 1rem 0', fontSize: '1.1rem' }}>Backup Now</h2>
+
+            {!backupRunning && backupSteps.length === 0 && (
+              <>
+                <p style={{ color: '#8890a0', fontSize: '0.85rem', margin: '0 0 0.75rem 0' }}>
+                  Select volumes to back up to <code style={{ color: '#c084fc' }}>{backupSettings.backup_target}</code>
+                </p>
+
+                {/* All / None */}
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                    onClick={() => setBackupSelection(new Set(paths.map(p => `${p.host}:${p.path}`)))}>All</button>
+                  <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                    onClick={() => setBackupSelection(new Set())}>None</button>
+                  <span style={{ color: '#8890a0', fontSize: '0.8rem', alignSelf: 'center', marginLeft: 'auto' }}>
+                    {backupSelection.size} / {paths.length} selected
+                  </span>
+                </div>
+
+                {/* Volume checkboxes grouped by host */}
+                <div style={{ maxHeight: '300px', overflowY: 'auto', marginBottom: '1rem' }}>
+                  {sortedHosts.map(([host, hostPaths]) => (
+                    <div key={host} style={{ marginBottom: '0.75rem' }}>
+                      <div style={{ color: '#7c9ef8', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem' }}>{host}</div>
+                      {hostPaths.map((p, i) => {
+                        const key = `${p.host}:${p.path}`
+                        return (
+                          <label key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.2rem 0', cursor: 'pointer' }}>
+                            <input type="checkbox" checked={backupSelection.has(key)}
+                              onChange={() => toggleBackupVol(key)} />
+                            <span style={{ color: '#e0e0e0', fontSize: '0.85rem', fontFamily: 'monospace' }}>{p.path}</span>
+                            {p.description && <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>({p.description})</span>}
+                          </label>
+                        )
+                      })}
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                  <button style={btnSecondary} onClick={closeBackupDialog}>Cancel</button>
+                  <button style={btnSuccess} onClick={startBackup} disabled={backupSelection.size === 0}>
+                    Start Backup ({backupSelection.size} volume{backupSelection.size !== 1 ? 's' : ''})
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Progress */}
+            {(backupRunning || backupSteps.length > 0) && (
+              <>
+                <StepList steps={backupSteps} />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1rem' }}>
+                  {!backupRunning && (
+                    <button style={btnPrimary} onClick={closeBackupDialog}>Close</button>
+                  )}
+                  {backupRunning && (
+                    <span style={{ color: '#f59e0b', fontSize: '0.85rem' }}>Backup in progress...</span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Restore Dialog ─────────────────────────────────── */}
+      {showRestore && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000,
+        }} onClick={(e) => { if (e.target === e.currentTarget && !restoreRunning) closeRestoreDialog() }}>
+          <div style={{ background: '#1a1a2e', borderRadius: '8px', padding: '1.5rem', width: '600px', maxHeight: '80vh', overflowY: 'auto' }}>
+            <h2 style={{ color: '#e0e0e0', margin: '0 0 1rem 0', fontSize: '1.1rem' }}>Restore from Backup</h2>
+
+            {!restoreRunning && restoreSteps.length === 0 && (
+              <>
+                {/* Host selection */}
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={labelStyle}>Host</label>
+                  <select style={selectStyle} value={restoreHost}
+                    onChange={e => loadSnapshots(e.target.value)}>
+                    <option value="">Select host...</option>
+                    {hostNames.map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+
+                {loadingSnapshots && <p style={{ color: '#8890a0', fontSize: '0.85rem' }}>Loading snapshots...</p>}
+
+                {restoreHost && !loadingSnapshots && restoreSnapshots.length === 0 && (
+                  <p style={{ color: '#8890a0', fontSize: '0.85rem' }}>No snapshots found for {restoreHost}</p>
+                )}
+
+                {/* Date selection */}
+                {allRestoreDates.length > 0 && (
+                  <div style={{ marginBottom: '1rem' }}>
+                    <label style={labelStyle}>Snapshot Date</label>
+                    <select style={selectStyle} value={restoreDate}
+                      onChange={e => selectRestoreDate(e.target.value)}>
+                      <option value="">Select date...</option>
+                      {allRestoreDates.map(d => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Volume checkboxes */}
+                {restoreDate && restoreVolumesForDate.length > 0 && (
+                  <div style={{ marginBottom: '1rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                      <label style={{ ...labelStyle, margin: 0 }}>Volumes to Restore</label>
+                      <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}
+                        onClick={() => setRestoreSelection(new Set(restoreVolumesForDate.map(v => v.path)))}>All</button>
+                      <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}
+                        onClick={() => setRestoreSelection(new Set())}>None</button>
+                      <span style={{ color: '#8890a0', fontSize: '0.8rem', marginLeft: 'auto' }}>
+                        {restoreSelection.size} / {restoreVolumesForDate.length} selected
+                      </span>
+                    </div>
+                    <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                      {restoreVolumesForDate.map(v => (
+                        <label key={v.slug} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.2rem 0', cursor: 'pointer' }}>
+                          <input type="checkbox" checked={restoreSelection.has(v.path)}
+                            onChange={() => toggleRestoreVol(v.path)} />
+                          <span style={{ color: '#e0e0e0', fontSize: '0.85rem', fontFamily: 'monospace' }}>{v.path}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Restore to different host */}
+                {restoreDate && restoreSelection.size > 0 && (
+                  <div style={{ marginBottom: '1rem' }}>
+                    <label style={labelStyle}>Restore To</label>
+                    <select style={selectStyle} value={restoreTargetHost || restoreHost}
+                      onChange={e => setRestoreTargetHost(e.target.value === restoreHost ? '' : e.target.value)}>
+                      {hostNames.map(h => (
+                        <option key={h} value={h}>{h}{h === restoreHost ? ' (source)' : ''}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Warning */}
+                {restoreDate && restoreSelection.size > 0 && (
+                  <div style={{
+                    background: 'rgba(248, 113, 113, 0.1)', border: '1px solid rgba(248, 113, 113, 0.3)',
+                    borderRadius: '4px', padding: '0.75rem', marginBottom: '1rem',
+                  }}>
+                    <p style={{ color: '#fca5a5', fontSize: '0.85rem', margin: 0 }}>
+                      This will stop affected containers on <strong>{restoreTargetHost || restoreHost}</strong>,
+                      overwrite {restoreSelection.size} volume{restoreSelection.size !== 1 ? 's' : ''} with
+                      the {restoreDate} snapshot from {restoreHost}, then restart the containers.
+                    </p>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                  <button style={btnSecondary} onClick={closeRestoreDialog}>Cancel</button>
+                  <button style={btnAmber} onClick={startRestore}
+                    disabled={!restoreHost || !restoreDate || restoreSelection.size === 0}>
+                    Restore ({restoreSelection.size} volume{restoreSelection.size !== 1 ? 's' : ''})
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Progress */}
+            {(restoreRunning || restoreSteps.length > 0) && (
+              <>
+                <StepList steps={restoreSteps} />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1rem' }}>
+                  {!restoreRunning && (
+                    <button style={btnPrimary} onClick={closeRestoreDialog}>Close</button>
+                  )}
+                  {restoreRunning && (
+                    <span style={{ color: '#f59e0b', fontSize: '0.85rem' }}>Restore in progress...</span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

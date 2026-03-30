@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 interface Image {
   name: string
@@ -165,6 +166,7 @@ export default function Images() {
   const [editUrl, setEditUrl] = useState('')
   const [editHvs, setEditHvs] = useState<string[]>(['ALL'])
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  useUnsavedChanges(showAdd || editingName !== null)
 
   const nodeNames = infraNodes.filter(h => h.enabled).map(h => h.name)
 

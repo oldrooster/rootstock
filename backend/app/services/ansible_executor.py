@@ -11,7 +11,7 @@ from app.models.node import NodeDefinition
 from app.models.vm import VMDefinition
 from app.services.caddy_service import generate_caddyfile
 from app.services.cloudflare_service import generate_tunnel_config
-from app.services.compose_service import generate_compose
+from app.services.compose_service import generate_compose, generate_env_file
 from app.services.dns_service import (
     build_host_ip_map,
     generate_pihole_custom_dns,
@@ -19,7 +19,7 @@ from app.services.dns_service import (
     get_all_records,
 )
 from app.services.ingress_service import get_manual_rules, get_settings as get_ingress_settings
-from app.services.inventory_service import generate_inventory
+from app.services.inventory_service import generate_inventory, safe_group_name
 from app.services.secret_store import SecretStore
 from app.models.template import TemplateDefinition
 
@@ -69,7 +69,7 @@ def _write_ssh_keys(
         pem = _resolve_private_key(ref, secret_store)
         if pem:
             key_path = keys_dir / f"{vm.name}.key"
-            key_path.write_text(pem)
+            key_path.write_text(pem.strip() + "\n")
             key_path.chmod(0o600)
             ssh_key_files[vm.name] = str(key_path)
 
@@ -81,7 +81,7 @@ def _write_ssh_keys(
         pem = _resolve_private_key(ref, secret_store)
         if pem:
             key_path = keys_dir / f"{node.name}.key"
-            key_path.write_text(pem)
+            key_path.write_text(pem.strip() + "\n")
             key_path.chmod(0o600)
             ssh_key_files[node.name] = str(key_path)
 
@@ -119,9 +119,11 @@ def prepare_ansible_workspace(
 
     # Generate playbook based on scope
     if scope == "roles":
-        _write_roles_playbook(workspace_dir, vms, nodes, filter_roles)
+        from app.services.global_settings import get_global_settings
+        gs = get_global_settings(repo_path)
+        _write_roles_playbook(workspace_dir, vms, nodes, filter_roles, gs.role_order)
     elif scope == "containers":
-        _write_containers_playbook(workspace_dir, repo_path, containers or [], nodes, vms)
+        _write_containers_playbook(workspace_dir, repo_path, containers or [], nodes, vms, secret_store)
     elif scope == "dns":
         _write_dns_playbook(workspace_dir, repo_path, containers or [], nodes, vms)
     elif scope == "ingress":
@@ -153,16 +155,28 @@ def _write_roles_playbook(
     vms: list[VMDefinition],
     nodes: list[NodeDefinition],
     filter_roles: set[str] | None = None,
+    role_order: list[str] | None = None,
 ) -> None:
     """Generate playbook that applies roles to their assigned hosts."""
     role_hosts = _collect_hosts_with_roles(vms, nodes)
     plays = []
-    for role, hosts in sorted(role_hosts.items()):
+
+    # Order roles: explicit order first, then remaining alphabetically
+    if role_order:
+        ordered = [r for r in role_order if r in role_hosts]
+        remaining = sorted(set(role_hosts) - set(ordered))
+        ordered_roles = ordered + remaining
+    else:
+        ordered_roles = sorted(role_hosts)
+
+    for role in ordered_roles:
+        hosts = role_hosts[role]
         if filter_roles is not None and role not in filter_roles:
             continue
+        group = safe_group_name(role)
         plays.append(
             f"- name: Apply role '{role}'\n"
-            f"  hosts: {role}\n"
+            f"  hosts: {group}\n"
             f"  become: true\n"
             f"  roles:\n"
             f"    - {role}\n"
@@ -182,8 +196,9 @@ def _write_containers_playbook(
     containers: list[ContainerDefinition],
     nodes: list[NodeDefinition],
     vms: list[VMDefinition],
+    secret_store: SecretStore | None = None,
 ) -> None:
-    """Generate playbook + compose files for deploying containers per host."""
+    """Generate playbook + compose + .env files for deploying containers per host."""
     files_dir = workspace_dir / "files" / "compose"
     files_dir.mkdir(parents=True, exist_ok=True)
 
@@ -196,12 +211,31 @@ def _write_containers_playbook(
             if ctr.network:
                 all_networks.add(ctr.network)
 
+    has_env_file = False
     for host in sorted(all_hosts):
         host_containers = [c for c in containers if c.enabled and host in c.hosts]
         compose_content = generate_compose(host, host_containers)
         host_dir = files_dir / host
         host_dir.mkdir(parents=True, exist_ok=True)
         (host_dir / "docker-compose.yml").write_text(compose_content)
+
+        # Generate .env file with resolved secrets
+        if secret_store:
+            env_content = generate_env_file(host, host_containers, secret_store)
+            if env_content:
+                (host_dir / ".env").write_text(env_content)
+                has_env_file = True
+            else:
+                # Write empty .env to ensure clean state
+                (host_dir / ".env").write_text("")
+                has_env_file = True
+
+    # Collect build-from-repo containers per host
+    build_containers_by_host: dict[str, list[ContainerDefinition]] = {}
+    for ctr in containers:
+        if ctr.enabled and ctr.build_repo:
+            for host in ctr.hosts:
+                build_containers_by_host.setdefault(host, []).append(ctr)
 
     # Write playbook
     tasks = [
@@ -222,17 +256,92 @@ def _write_containers_playbook(
             "      changed_when: net_create.rc == 0\n"
         )
 
+    # Clone/pull repos and build images for build-from-repo containers
+    all_build_ctrs = {c.name: c for c in containers if c.enabled and c.build_repo}
+    for ctr in all_build_ctrs.values():
+        build_dir = f"/opt/docker/build/{ctr.name}"
+        # Determine which hosts have this container
+        ctr_hosts = [h for h in ctr.hosts if h in all_hosts]
+        when_clause = ""
+        if set(ctr_hosts) != all_hosts:
+            host_list_str = "', '".join(sorted(ctr_hosts))
+            when_clause = f"      when: inventory_hostname in ['{host_list_str}']\n"
+
+        tasks.append(
+            f"    - name: Clone/update repo for '{ctr.name}'\n"
+            f"      git:\n"
+            f"        repo: \"{ctr.build_repo}\"\n"
+            f"        dest: {build_dir}\n"
+            f"        version: \"{ctr.build_branch}\"\n"
+            f"        force: true\n"
+            + when_clause
+        )
+        tasks.append(
+            f"    - name: Build image for '{ctr.name}'\n"
+            f"      command: docker build -t {ctr.image} -f {ctr.build_dockerfile} {ctr.build_context}\n"
+            f"      args:\n"
+            f"        chdir: {build_dir}\n"
+            + when_clause
+        )
+
     tasks += [
         "    - name: Copy docker-compose.yml\n"
         "      copy:\n"
         "        src: \"files/compose/{{ inventory_hostname }}/docker-compose.yml\"\n"
         "        dest: /opt/docker/docker-compose.yml\n"
         "        mode: '0644'\n",
-        "    - name: Pull and start containers\n"
-        "      command: docker compose -f /opt/docker/docker-compose.yml up -d --pull always\n"
-        "      args:\n"
-        "        chdir: /opt/docker\n",
     ]
+
+    if has_env_file:
+        tasks.append(
+            "    - name: Copy .env file (secrets)\n"
+            "      copy:\n"
+            "        src: \"files/compose/{{ inventory_hostname }}/.env\"\n"
+            "        dest: /opt/docker/.env\n"
+            "        mode: '0600'\n"
+        )
+
+    # Pull latest images for registry-based (non-build) containers per host,
+    # then bring everything up. This ensures existing containers get updated.
+    pull_services_by_host: dict[str, list[str]] = {}
+    for host in sorted(all_hosts):
+        host_containers = [c for c in containers if c.enabled and host in c.hosts]
+        pull_names = [c.name for c in host_containers if not c.build_repo]
+        if pull_names:
+            pull_services_by_host[host] = pull_names
+
+    if pull_services_by_host:
+        # If all hosts have the same pull list, use a single unconditional task
+        all_pull_lists = list(pull_services_by_host.values())
+        if len(set(tuple(s) for s in all_pull_lists)) == 1 and set(pull_services_by_host) == all_hosts:
+            svc_list = " ".join(all_pull_lists[0])
+            tasks.append(
+                f"    - name: Pull latest images\n"
+                f"      command: docker compose -f /opt/docker/docker-compose.yml pull {svc_list}\n"
+                f"      args:\n"
+                f"        chdir: /opt/docker\n"
+                f"      register: pull_result\n"
+                f"      changed_when: \"'Pull complete' in pull_result.stderr or 'Downloaded newer' in pull_result.stderr\"\n"
+            )
+        else:
+            for host, svc_names in sorted(pull_services_by_host.items()):
+                svc_list = " ".join(svc_names)
+                tasks.append(
+                    f"    - name: Pull latest images on {host}\n"
+                    f"      command: docker compose -f /opt/docker/docker-compose.yml pull {svc_list}\n"
+                    f"      args:\n"
+                    f"        chdir: /opt/docker\n"
+                    f"      when: inventory_hostname == '{host}'\n"
+                    f"      register: pull_result\n"
+                    f"      changed_when: \"'Pull complete' in pull_result.stderr or 'Downloaded newer' in pull_result.stderr\"\n"
+                )
+
+    tasks.append(
+        f"    - name: Start containers\n"
+        f"      command: docker compose -f /opt/docker/docker-compose.yml up -d --remove-orphans\n"
+        f"      args:\n"
+        f"        chdir: /opt/docker\n"
+    )
 
     host_list = ",".join(sorted(all_hosts)) if all_hosts else "localhost"
     content = (
@@ -539,8 +648,8 @@ def _write_ingress_playbook(
         + "        caddy-cloudflare\n"
         "      when: caddy_running.rc != 0 or caddy_running.stdout != 'true'"
         f" or {needs_recreate}\n",
-        "    - name: Reload Caddy config\n"
-        "      command: docker exec caddy caddy reload --config /etc/caddy/Caddyfile\n"
+        "    - name: Restart Caddy to apply config\n"
+        "      command: docker restart caddy\n"
         "      when: caddyfile_result.changed and caddy_running.stdout == 'true'"
         f" and not ({needs_recreate})\n",
     ]
@@ -552,27 +661,118 @@ def _write_ingress_playbook(
         f"  tasks:\n" + "\n".join(tasks)
     )
 
-    if tunnel_hosts:
-        tunnel_list = ",".join(sorted(tunnel_hosts))
+    # Resolve per-host tunnel tokens from secret store
+    # Each host can have its own tunnel, or fall back to the default token
+    host_tunnel_tokens: dict[str, str] = {}  # host -> resolved token
+    if secret_store:
+        for host in sorted(tunnel_hosts):
+            secret_key = ingress_settings.tunnel_tokens.get(host) or ingress_settings.tunnel_token_secret
+            if secret_key:
+                try:
+                    host_tunnel_tokens[host] = secret_store.get(secret_key)
+                except Exception:
+                    logger.warning("Could not resolve tunnel token secret '%s' for host %s",
+                                   secret_key, host)
+
+    # Auto-provision tunnels for hosts without tokens if CF API token is available
+    missing_token_hosts = {h for h in tunnel_hosts if h not in host_tunnel_tokens}
+    if missing_token_hosts and cf_token and secret_store:
+        try:
+            from app.services.cloudflare_service import (
+                collect_external_hostnames,
+                ensure_tunnel_for_host,
+                get_account_id,
+                get_zone_id,
+            )
+            account_id = ingress_settings.cloudflare_account_id or get_account_id(cf_token)
+
+            # Try to get zone_id for DNS record creation
+            zone_id = None
+            if ingress_settings.wildcard_domain:
+                # Extract base domain from wildcard (e.g. "*.cbf.nz" -> "cbf.nz")
+                base_domain = ingress_settings.wildcard_domain.lstrip("*.")
+                try:
+                    zone_id = get_zone_id(cf_token, base_domain)
+                except Exception as e:
+                    logger.warning("Could not get zone ID for %s: %s", base_domain, e)
+
+            for host in sorted(missing_token_hosts):
+                try:
+                    hostnames = collect_external_hostnames(host, containers, manual_rules)
+                    token = ensure_tunnel_for_host(
+                        cf_token, account_id, host, hostnames, zone_id,
+                    )
+                    # Store the token in the secret store for future use
+                    secret_key = f"cloudflare/tunnel_token_{host}"
+                    secret_store.set(secret_key, token)
+                    host_tunnel_tokens[host] = token
+                    logger.info("Auto-provisioned tunnel for %s, stored as secret '%s'", host, secret_key)
+                except Exception as e:
+                    logger.warning("Failed to auto-provision tunnel for %s: %s", host, e)
+        except Exception as e:
+            logger.warning("Failed to auto-provision tunnels: %s", e)
+
+    # Only deploy to hosts that have a resolved token
+    deployable_tunnel_hosts = {h for h in tunnel_hosts if h in host_tunnel_tokens}
+    missing_token_hosts = tunnel_hosts - deployable_tunnel_hosts
+
+    if deployable_tunnel_hosts:
+        tunnel_list = ",".join(sorted(deployable_tunnel_hosts))
+
+        # Write token to a file per host so Ansible can read it without shell escaping issues
+        for host in sorted(deployable_tunnel_hosts):
+            host_tunnel = tunnel_dir / host
+            host_tunnel.mkdir(parents=True, exist_ok=True)
+            (host_tunnel / "tunnel_token").write_text(host_tunnel_tokens[host])
+
+        tunnel_tasks = [
+            f"    - name: Ensure Docker network '{docker_network}' exists\n"
+            f"      command: docker network create {docker_network}\n"
+            "      register: tunnel_net_create\n"
+            "      failed_when: tunnel_net_create.rc != 0 and 'already exists' not in tunnel_net_create.stderr\n"
+            "      changed_when: tunnel_net_create.rc == 0\n",
+            "    - name: Read tunnel token\n"
+            "      set_fact:\n"
+            '        tunnel_token: "{{ lookup(\'file\', \'files/cloudflared/\' + inventory_hostname + \'/tunnel_token\') }}"\n',
+            "    - name: Check if cloudflared container is running\n"
+            "      command: docker inspect -f '{%raw%}{{.State.Running}}{%endraw%}' cloudflared\n"
+            "      register: cfd_running\n"
+            "      failed_when: false\n"
+            "      changed_when: false\n",
+            "    - name: Check cloudflared container token matches\n"
+            "      shell: docker inspect -f '{%raw%}{{.Config.Cmd}}{%endraw%}' cloudflared 2>/dev/null\n"
+            "      register: cfd_cmd\n"
+            "      failed_when: false\n"
+            "      changed_when: false\n",
+            "    - name: Remove cloudflared container (not running or token changed)\n"
+            "      command: docker rm -f cloudflared\n"
+            "      failed_when: false\n"
+            "      when: >\n"
+            "        cfd_running.rc == 0 and\n"
+            "        (cfd_running.stdout != 'true' or tunnel_token not in (cfd_cmd.stdout | default('')))\n",
+            "    - name: Create cloudflared container\n"
+            "      command: >-\n"
+            "        docker run -d --name cloudflared\n"
+            "        --restart unless-stopped\n"
+            f"        --network {docker_network}\n"
+            "        cloudflare/cloudflared:latest\n"
+            "        tunnel --no-autoupdate run --token {{ tunnel_token }}\n"
+            "      when: >\n"
+            "        cfd_running.rc != 0 or cfd_running.stdout != 'true'\n"
+            "        or tunnel_token not in (cfd_cmd.stdout | default(''))\n",
+        ]
+
         content += (
             f"\n- name: Deploy cloudflared tunnels\n"
             f"  hosts: {tunnel_list}\n"
             f"  become: true\n"
-            f"  tasks:\n"
-            f"    - name: Ensure /etc/cloudflared exists\n"
-            f"      file:\n"
-            f"        path: /etc/cloudflared\n"
-            f"        state: directory\n"
-            f"        mode: '0755'\n"
-            f"    - name: Copy cloudflared config\n"
-            f"      copy:\n"
-            f"        src: \"files/cloudflared/{{{{ inventory_hostname }}}}/config.yml\"\n"
-            f"        dest: /etc/cloudflared/config.yml\n"
-            f"        mode: '0644'\n"
-            f"    - name: Restart cloudflared\n"
-            f"      systemd:\n"
-            f"        name: cloudflared\n"
-            f"        state: restarted\n"
+            f"  tasks:\n" + "\n".join(tunnel_tasks)
+        )
+
+    if missing_token_hosts:
+        logger.warning(
+            "Hosts %s have external services but no tunnel token configured (set per-host or default in ingress settings)",
+            sorted(missing_token_hosts),
         )
 
     (workspace_dir / "playbook.yml").write_text(content)

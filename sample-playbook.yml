@@ -1,0 +1,127 @@
+---
+# tasks/main.yml — Enable Intel iGPU (Quick Sync) inside a VM
+#
+# For use with Jellyfin hardware transcoding (Docker) after iGPU passthrough.
+
+# ── 1. Install full kernel (cloud kernel lacks i915) ─────────────
+
+- name: Check if i915 module is available
+  ansible.builtin.command: modprobe --dry-run i915
+  register: _i915_check
+  changed_when: false
+  failed_when: false
+
+- name: Install full kernel and GPU tools
+  ansible.builtin.apt:
+    name:
+      - "linux-image-{{ ansible_architecture | regex_replace('x86_64', 'amd64') }}"
+      - intel-gpu-tools
+      - vainfo
+    state: present
+    update_cache: true
+  register: _kernel_install
+  when: _i915_check.rc != 0
+
+- name: Install GPU tools only (i915 already available)
+  ansible.builtin.apt:
+    name:
+      - intel-gpu-tools
+      - vainfo
+    state: present
+    update_cache: true
+  when: _i915_check.rc == 0
+
+- name: Set full kernel as default in GRUB
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_DEFAULT='
+    line: 'GRUB_DEFAULT=0'
+    backup: true
+  when: _i915_check.rc != 0
+  register: _grub_default
+
+- name: Remove cloud kernel
+  ansible.builtin.apt:
+    name: "linux-image-*-cloud-*"
+    state: absent
+    purge: true
+  when: _i915_check.rc != 0
+  register: _cloud_kernel_removed
+
+- name: Update GRUB
+  ansible.builtin.command: update-grub
+  when: _i915_check.rc != 0
+
+- name: Reboot into full kernel
+  ansible.builtin.reboot:
+    msg: "Rebooting into full kernel for i915 GPU support"
+    reboot_timeout: 300
+  when: _i915_check.rc != 0
+
+# ── 2. Load i915 driver ──────────────────────────────────────────
+
+- name: Ensure i915 module loads at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/i915.conf
+    mode: "0644"
+    content: |
+      i915
+
+- name: Load i915 module now
+  ansible.builtin.command: modprobe i915
+  register: _i915_loaded
+  changed_when: _i915_loaded.rc == 0
+
+# ── 3. Verify GPU is available ───────────────────────────────────
+
+- name: Check for /dev/dri/renderD128
+  ansible.builtin.stat:
+    path: /dev/dri/renderD128
+  register: _render_node
+
+- name: Fail if render node is missing
+  ansible.builtin.fail:
+    msg: |
+      /dev/dri/renderD128 not found — i915 driver may not have loaded.
+      Try rebooting the VM and re-running this role.
+  when: not _render_node.stat.exists
+
+- name: Verify VA-API support
+  ansible.builtin.command: vainfo
+  register: _vainfo
+  changed_when: false
+
+- name: Show VA-API capabilities
+  ansible.builtin.debug:
+    msg: "{{ _vainfo.stdout_lines }}"
+
+# ── 4. Make GPU accessible to Docker containers ─────────────────
+
+- name: Set world-readable permissions on /dev/dri devices
+  ansible.builtin.copy:
+    dest: /etc/udev/rules.d/99-intel-gpu.rules
+    mode: "0644"
+    content: |
+      KERNEL=="card[0-9]*", SUBSYSTEM=="drm", MODE="0666"
+      KERNEL=="renderD*", SUBSYSTEM=="drm", MODE="0666"
+  register: _udev_rules
+
+- name: Reload udev rules
+  ansible.builtin.shell: udevadm control --reload-rules && udevadm trigger --subsystem-match=drm
+  when: _udev_rules.changed
+
+- name: Apply permissions to existing devices
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0666"
+  loop:
+    - /dev/dri/card0
+    - /dev/dri/renderD128
+  when: _udev_rules.changed
+
+- name: Intel iGPU Quick Sync ready for Docker
+  ansible.builtin.debug:
+    msg: >-
+      Intel iGPU is available at /dev/dri/renderD128.
+      Add 'devices: ["/dev/dri:/dev/dri"]' to your Jellyfin docker-compose service,
+      then enable Intel QuickSync (QSV) under Dashboard → Playback → Transcoding.

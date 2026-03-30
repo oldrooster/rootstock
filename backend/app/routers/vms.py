@@ -45,6 +45,22 @@ def _validate_node(node: str, node_store: NodeStore) -> None:
         )
 
 
+def _validate_gpu_passthrough(
+    vm_name: str, node: str, gpu_passthrough: bool, store: VMStore,
+) -> None:
+    """Ensure only one VM per node has iGPU passthrough enabled."""
+    if not gpu_passthrough:
+        return
+    for vm in store.list_all():
+        if vm.name == vm_name:
+            continue
+        if vm.enabled and vm.node == node and vm.gpu_passthrough:
+            raise HTTPException(
+                status_code=409,
+                detail=f"iGPU passthrough already assigned to '{vm.name}' on {node}. Only one VM per host is allowed.",
+            )
+
+
 @router.get("/")
 async def list_vms(store: VMStore = Depends(get_store)) -> list[VMDefinition]:
     return store.list_all()
@@ -65,6 +81,7 @@ async def create_vm(
         if e.status_code != 404:
             raise
 
+    _validate_gpu_passthrough(body.name, body.node, body.gpu_passthrough, store)
     vm = VMDefinition(**body.model_dump())
     store.write(vm)
     git.commit_all(f"[terraform] add: {body.name} on {body.node}")
@@ -206,6 +223,12 @@ class SSHTestResult(BaseModel):
     detail: str
 
 
+class SSHTestRequest(BaseModel):
+    host: str
+    user: str
+    private_key: str
+
+
 class SetupSSHKeyRequest(BaseModel):
     host: str
     user: str
@@ -265,27 +288,23 @@ async def setup_ssh_key(body: SetupSSHKeyRequest) -> SetupSSHKeyResult:
 
 
 @router.post("/test-ssh")
-async def test_ssh(
-    host: str,
-    user: str,
-    private_key: str,
-) -> SSHTestResult:
+async def test_ssh(body: SSHTestRequest) -> SSHTestResult:
     """Test SSH connectivity to a VM."""
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         try:
-            pkey = paramiko.Ed25519Key.from_private_key(io.StringIO(private_key))
+            pkey = paramiko.Ed25519Key.from_private_key(io.StringIO(body.private_key))
         except Exception:
-            pkey = paramiko.RSAKey.from_private_key(io.StringIO(private_key))
+            pkey = paramiko.RSAKey.from_private_key(io.StringIO(body.private_key))
 
         client.connect(
-            hostname=host, username=user, pkey=pkey,
+            hostname=body.host, username=body.user, pkey=pkey,
             timeout=10, look_for_keys=False, allow_agent=False,
         )
         _, stdout, _ = client.exec_command("hostname", timeout=5)
         hostname = stdout.read().decode().strip()
-        return SSHTestResult(success=True, detail=f"Connected to {user}@{host} (hostname: {hostname})")
+        return SSHTestResult(success=True, detail=f"Connected to {body.user}@{body.host} (hostname: {hostname})")
     except paramiko.AuthenticationException:
         return SSHTestResult(success=False, detail="Authentication failed — check username and private key")
     except Exception as e:
@@ -372,6 +391,7 @@ async def update_vm(
     patch_data = body.model_dump(exclude_none=True)
     updated_data.update(patch_data)
     updated = VMDefinition(**updated_data)
+    _validate_gpu_passthrough(name, updated.node, updated.gpu_passthrough, store)
     store.write(updated)
     git.commit_all(f"[terraform] update: {name}")
     return updated

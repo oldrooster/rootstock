@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -10,6 +11,11 @@ class ManualBackupPath(BaseModel):
     host: str
     path: str
     description: str = ""
+
+
+def path_slug(path: str) -> str:
+    """Convert a path like /var/docker_vols/unifi/config to a safe directory name."""
+    return re.sub(r"[^a-zA-Z0-9_.-]", "_", path.strip("/"))
 
 
 def _paths_file(repo_path: str) -> Path:
@@ -33,6 +39,7 @@ class BackupPath(BaseModel):
     path: str
     source: str  # "container" | "manual"
     description: str = ""
+    exclusions: list[str] = []
 
 
 def get_all_backup_paths(
@@ -57,6 +64,7 @@ def get_all_backup_paths(
                     path=resolved,
                     source="container",
                     description=f"from container '{ctr.name}'",
+                    exclusions=list(vol.backup_exclusions),
                 ))
 
     for mp in get_manual_paths(repo_path):

@@ -10,6 +10,7 @@ class VolumeMount(BaseModel):
     host_path: str
     container_path: str
     backup: bool = False
+    backup_exclusions: list[str] = []
 
 
 class ComposeExtra(BaseModel):
@@ -34,10 +35,13 @@ class ContainerDefinition(BaseModel):
     ports: list[PortMapping] = []
     volumes: list[VolumeMount] = []
     env: dict[str, str] = {}
-    secrets: list[str] = []
+    devices: list[str] = []
     compose_extras: dict[str, ComposeExtra] = {}
     network: str | None = None
-    backup_exclusions: list[str] = []
+    build_repo: str = ""
+    build_branch: str = "main"
+    build_dockerfile: str = "Dockerfile"
+    build_context: str = "."
 
     @model_validator(mode="before")
     @classmethod
@@ -65,6 +69,17 @@ class ContainerDefinition(BaseModel):
                 data["dns_name"] = dns["hostname"]
         elif "dns" in data and "dns_name" in data:
             data.pop("dns")
+        # Remove deprecated secrets field
+        data.pop("secrets", None)
+        # Migrate container-level backup_exclusions to per-volume
+        if "backup_exclusions" in data and "volumes" in data:
+            excl = data.pop("backup_exclusions")
+            if excl:
+                for vol in data["volumes"]:
+                    if isinstance(vol, dict) and vol.get("backup") and not vol.get("backup_exclusions"):
+                        vol["backup_exclusions"] = excl
+        else:
+            data.pop("backup_exclusions", None)
         return data
 
 
@@ -81,10 +96,13 @@ class ContainerCreate(BaseModel):
     ports: list[PortMapping] = []
     volumes: list[VolumeMount] = []
     env: dict[str, str] = {}
-    secrets: list[str] = []
+    devices: list[str] = []
     compose_extras: dict[str, ComposeExtra] = {}
     network: str | None = None
-    backup_exclusions: list[str] = []
+    build_repo: str = ""
+    build_branch: str = "main"
+    build_dockerfile: str = "Dockerfile"
+    build_context: str = "."
 
 
 class ContainerUpdate(BaseModel):
@@ -99,7 +117,10 @@ class ContainerUpdate(BaseModel):
     ports: list[PortMapping] | None = None
     volumes: list[VolumeMount] | None = None
     env: dict[str, str] | None = None
-    secrets: list[str] | None = None
+    devices: list[str] | None = None
     compose_extras: dict[str, ComposeExtra] | None = None
     network: str | None = None
-    backup_exclusions: list[str] | None = None
+    build_repo: str | None = None
+    build_branch: str | None = None
+    build_dockerfile: str | None = None
+    build_context: str | None = None

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.models.role import RoleCreate, RoleDefinition, RoleUpdate
 from app.services.git_service import GitService
+from app.services.global_settings import get_global_settings, save_global_settings
 from app.services.node_store import NodeStore
 from app.services.role_store import RoleStore
 from app.services.vm_store import VMStore
@@ -43,6 +44,11 @@ async def create_role(
 ) -> RoleDefinition:
     role = RoleDefinition(**body.model_dump())
     store.create(role)
+    # Append to role order
+    gs = get_global_settings(settings.homelab_repo_path)
+    if role.name not in gs.role_order:
+        gs.role_order.append(role.name)
+        save_global_settings(settings.homelab_repo_path, gs)
     git.commit_all(f"[role] add: {role.name}")
     return role
 
@@ -115,6 +121,32 @@ async def update_matrix(
     return {"updated": changed}
 
 
+@router.get("/order")
+async def get_role_order(store: RoleStore = Depends(get_store)) -> list[str]:
+    """Return roles in execution order. Roles not in the saved order are appended alphabetically."""
+    gs = get_global_settings(settings.homelab_repo_path)
+    all_names = {r.name for r in store.list_all()}
+    ordered = [n for n in gs.role_order if n in all_names]
+    remaining = sorted(all_names - set(ordered))
+    return ordered + remaining
+
+
+class RoleOrderUpdate(BaseModel):
+    order: list[str]
+
+
+@router.put("/order")
+async def set_role_order(
+    body: RoleOrderUpdate,
+    git: GitService = Depends(get_git),
+) -> list[str]:
+    gs = get_global_settings(settings.homelab_repo_path)
+    gs.role_order = body.order
+    save_global_settings(settings.homelab_repo_path, gs)
+    git.commit_all("[settings] update role execution order")
+    return body.order
+
+
 @router.get("/{name}")
 async def get_role(name: str, store: RoleStore = Depends(get_store)) -> RoleDefinition:
     return store.get(name)
@@ -158,6 +190,11 @@ async def delete_role(
             detail=f"Cannot delete role '{name}': assigned to: {', '.join(referencing)}",
         )
     store.delete(name)
+    # Remove from role order
+    gs = get_global_settings(settings.homelab_repo_path)
+    if name in gs.role_order:
+        gs.role_order.remove(name)
+        save_global_settings(settings.homelab_repo_path, gs)
     git.commit_all(f"[role] remove: {name}")
 
 

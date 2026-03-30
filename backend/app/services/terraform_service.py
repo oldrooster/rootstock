@@ -137,6 +137,10 @@ def generate_main_tf(
             '}',
         ])
         # Download resource
+        # Proxmox rejects .qcow2 extension for ISO content — rename to .img
+        dl_file_name = cloud_image
+        if dl_file_name.endswith('.qcow2'):
+            dl_file_name = dl_file_name[:-6] + '.img'
         lines.extend([
             '',
             f'resource "proxmox_virtual_environment_download_file" "{res_name}" {{',
@@ -147,7 +151,7 @@ def generate_main_tf(
             '  content_type   = "iso"',
             '  datastore_id   = "local"',
             f'  node_name      = "{node}"',
-            f'  file_name      = "{cloud_image}"',
+            f'  file_name      = "{dl_file_name}"',
             f'  url            = var.image_url_{res_name}',
             '  overwrite      = false',
             '}',
@@ -161,6 +165,7 @@ def generate_main_tf(
         tpl = template_map.get(vm.template) if vm.template else None
         cloud_image = vm.image or (tpl.cloud_image if tpl else "")
         cpu = vm.cpu or (tpl.cpu if tpl else 2)
+        cpu_type = vm.cpu_type or "host"
         memory = vm.memory or (tpl.memory if tpl else 4096)
         disk = vm.disk or (tpl.disk if tpl else 32)
         user = vm.user or (tpl.user if tpl else "deploy")
@@ -192,6 +197,9 @@ def generate_main_tf(
         lines.extend([
             f'  name      = "{vm.name}"',
             f'  node_name = "{vm.node}"',
+            '  machine   = "q35"',
+        ])
+        lines.extend([
             '',
             '  agent {',
             '    enabled = true',
@@ -199,6 +207,7 @@ def generate_main_tf(
             '',
             '  cpu {',
             f'    cores = {cpu}',
+            f'    type  = "{cpu_type}"',
             '  }',
             '',
             '  memory {',
@@ -209,12 +218,31 @@ def generate_main_tf(
             '    datastore_id = "local-lvm"',
             f'    size         = {disk}',
             '    interface    = "scsi0"',
-            f'    file_id      = proxmox_virtual_environment_download_file.{image_downloads.get((vm.node, cloud_image), resource_name + "_image")}.id',
+        ])
+        if cloud_image:
+            dl_res = image_downloads[(vm.node, cloud_image)]
+            lines.append(f'    file_id      = proxmox_virtual_environment_download_file.{dl_res}.id')
+        lines.extend([
             '  }',
             '',
             '  network_device {',
             '    bridge = "vmbr0"',
             '  }',
+        ])
+
+        # iGPU passthrough via Proxmox resource mapping
+        if vm.gpu_passthrough:
+            lines.extend([
+                '',
+                '  hostpci {',
+                '    device  = "hostpci0"',
+                '    mapping = "iGPU"',
+                '    pcie    = true',
+                '    rombar  = true',
+                '  }',
+            ])
+
+        lines.extend([
             '',
             '  initialization {',
             '    datastore_id = "local-lvm"',

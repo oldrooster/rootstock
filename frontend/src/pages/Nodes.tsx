@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 const Terminal = lazy(() => import('../components/Terminal'))
 
@@ -242,6 +243,7 @@ export default function Nodes() {
   const [editingName, setEditingName] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<FormData>(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  useUnsavedChanges(showAdd || editingName !== null)
   const [testingName, setTestingName] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<{ name: string; success: boolean; api_ok: boolean; ssh_ok: boolean; message: string } | null>(null)
   const [secretKeys, setSecretKeys] = useState<string[]>([])

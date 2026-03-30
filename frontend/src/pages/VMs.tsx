@@ -1,4 +1,5 @@
 import { useEffect, useState, lazy, Suspense } from 'react'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 const Terminal = lazy(() => import('../components/Terminal'))
 
@@ -9,11 +10,13 @@ interface VM {
   ip: string
   template: string
   cpu: number
+  cpu_type: string
   memory: number
   disk: number
   image: string
   user: string
   ssh_key: string
+  gpu_passthrough: boolean
   roles: string[]
 }
 
@@ -84,18 +87,20 @@ interface FormData {
   ip: string
   template: string
   cpu: string
+  cpu_type: string
   memory: string
   disk: string
   image: string
   user: string
   ssh_key: string
+  gpu_passthrough: boolean
   roles: string
   enabled: boolean
 }
 
 const emptyForm: FormData = {
-  name: '', node: '', ip: '', template: '', cpu: '2', memory: '4096', disk: '32',
-  image: '', user: 'deploy', ssh_key: '',
+  name: '', node: '', ip: '', template: '', cpu: '2', cpu_type: 'host', memory: '4096', disk: '32',
+  image: '', user: 'deploy', ssh_key: '', gpu_passthrough: false,
   roles: '', enabled: true,
 }
 
@@ -106,11 +111,13 @@ function vmToForm(vm: VM): FormData {
     ip: vm.ip || '',
     template: vm.template || '',
     cpu: String(vm.cpu),
+    cpu_type: vm.cpu_type || 'host',
     memory: String(vm.memory),
     disk: String(vm.disk),
     image: vm.image,
     user: vm.user,
     ssh_key: vm.ssh_key,
+    gpu_passthrough: vm.gpu_passthrough || false,
     roles: (vm.roles || []).join(', '),
     enabled: vm.enabled,
   }
@@ -123,17 +130,19 @@ function formToPayload(f: FormData) {
     ip: f.ip,
     template: f.template,
     cpu: Number(f.cpu),
+    cpu_type: f.cpu_type,
     memory: Number(f.memory),
     disk: Number(f.disk),
     image: f.image,
     user: f.user,
     ssh_key: f.ssh_key,
+    gpu_passthrough: f.gpu_passthrough,
     roles: f.roles.split(',').map(s => s.trim()).filter(Boolean),
     enabled: f.enabled,
   }
 }
 
-function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, infraNodes, templates }: {
+function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, infraNodes, templates, allVms, currentName }: {
   form: FormData
   setForm: (f: FormData) => void
   onSubmit: () => void
@@ -142,6 +151,8 @@ function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, i
   disableName?: boolean
   infraNodes: { name: string; enabled: boolean }[]
   templates: Template[]
+  allVms?: VM[]
+  currentName?: string
 }) {
   const set = (field: keyof FormData, value: string | boolean) =>
     setForm({ ...form, [field]: value })
@@ -215,11 +226,24 @@ function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, i
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
         <div>
           <label style={labelStyle}>CPU Cores</label>
           <input style={inputStyle} value={form.cpu} type="number"
             onChange={e => set('cpu', e.target.value)} placeholder="2" />
+        </div>
+        <div>
+          <label style={labelStyle}>CPU Type</label>
+          <select style={{ ...inputStyle, appearance: 'auto' }} value={form.cpu_type}
+            onChange={e => set('cpu_type', e.target.value)}>
+            <option value="host">host</option>
+            <option value="x86-64-v2-AES">x86-64-v2-AES</option>
+            <option value="x86-64-v2">x86-64-v2</option>
+            <option value="x86-64-v3">x86-64-v3</option>
+            <option value="x86-64-v4">x86-64-v4</option>
+            <option value="kvm64">kvm64</option>
+            <option value="qemu64">qemu64</option>
+          </select>
         </div>
         <div>
           <label style={labelStyle}>Memory (MB)</label>
@@ -251,12 +275,28 @@ function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, i
         </div>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
         <label style={{ color: '#8890a0', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
           <input type="checkbox" checked={form.enabled}
             onChange={e => set('enabled', e.target.checked)} />
           Enabled
         </label>
+        <label style={{ color: '#8890a0', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <input type="checkbox" checked={form.gpu_passthrough}
+            onChange={e => set('gpu_passthrough', e.target.checked)} />
+          iGPU Passthrough
+        </label>
+        {form.gpu_passthrough && (() => {
+          const conflict = (allVms || []).find(v =>
+            v.name !== (currentName || form.name) && v.enabled && v.node === form.node && v.gpu_passthrough
+          )
+          if (conflict) return (
+            <span style={{ color: '#f87171', fontSize: '0.8rem' }}>
+              iGPU already assigned to {conflict.name} on {form.node}
+            </span>
+          )
+          return null
+        })()}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem' }}>
           <button style={btnSecondary} onClick={onCancel}>Cancel</button>
           <button style={btnPrimary} onClick={onSubmit}>{submitLabel}</button>
@@ -294,6 +334,7 @@ export default function VMs() {
   const [editForm, setEditForm] = useState<FormData>(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [terminalVM, setTerminalVM] = useState<string | null>(null)
+  useUnsavedChanges(showAdd || editingName !== null)
 
   // Import state
   const [showImport, setShowImport] = useState(false)
@@ -385,8 +426,11 @@ export default function VMs() {
     setSSHTesting(true)
     setSSHTestResult(null)
     try {
-      const params = new URLSearchParams({ host: selectedVM.ip, user: importUser, private_key: importKey })
-      const r = await fetch(`/api/vms/test-ssh?${params}`, { method: 'POST' })
+      const r = await fetch('/api/vms/test-ssh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: selectedVM.ip, user: importUser, private_key: importKey }),
+      })
       const result = await r.json()
       setSSHTestResult(result)
     } catch (e) {
@@ -430,8 +474,11 @@ export default function VMs() {
       const { value } = await sr.json()
       setImportKey(value)
       // Test SSH with it
-      const params = new URLSearchParams({ host: selectedVM.ip, user: importUser, private_key: value })
-      const r = await fetch(`/api/vms/test-ssh?${params}`, { method: 'POST' })
+      const r = await fetch('/api/vms/test-ssh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: selectedVM.ip, user: importUser, private_key: value }),
+      })
       const result = await r.json()
       setSSHTestResult(result)
     } catch (e) {
@@ -569,6 +616,7 @@ export default function VMs() {
           submitLabel="Create"
           infraNodes={infraNodes}
           templates={templates}
+          allVms={vms}
         />
       )}
 
@@ -598,6 +646,8 @@ export default function VMs() {
               disableName
               infraNodes={infraNodes}
               templates={templates}
+              allVms={vms}
+              currentName={vm.name}
             />
           ) : (
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -634,7 +684,15 @@ export default function VMs() {
                     </>
                   )}
                   <span style={{ margin: '0 0.75rem' }}>|</span>
-                  <span>{vm.cpu} CPU, {vm.memory} MB, {vm.disk} GB</span>
+                  <span>
+                    {vm.cpu} CPU ({vm.cpu_type || 'host'}), {vm.memory} MB, {vm.disk} GB
+                    {vm.gpu_passthrough && (
+                      <span style={{
+                        marginLeft: '0.5rem', fontSize: '0.7rem', padding: '0.1rem 0.4rem',
+                        borderRadius: '9999px', background: 'rgba(124,158,248,0.15)', color: '#7c9ef8',
+                      }}>iGPU</span>
+                    )}
+                  </span>
                   {vm.template && (
                     <>
                       <span style={{ margin: '0 0.75rem' }}>|</span>
@@ -791,7 +849,7 @@ export default function VMs() {
                     >Back</button>
                   </div>
                   <div style={{ color: '#8890a0', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                    {selectedVM.cpu} CPU, {selectedVM.memory} MB, {selectedVM.disk} GB
+                    {selectedVM.cpu} CPU ({selectedVM.cpu_type || 'host'}), {selectedVM.memory} MB, {selectedVM.disk} GB
                     {selectedVM.ip && <> | IP: <strong style={{ color: '#7c9ef8', fontFamily: 'monospace' }}>{selectedVM.ip}</strong></>}
                   </div>
                 </div>

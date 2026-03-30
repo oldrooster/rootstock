@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 interface Template {
   name: string
@@ -221,6 +222,7 @@ export default function Templates() {
   const [editingName, setEditingName] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<TplFormData>(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  useUnsavedChanges(showAdd || editingName !== null)
 
   function loadAll() {
     Promise.all([

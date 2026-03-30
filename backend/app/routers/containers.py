@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.models.container import ContainerCreate, ContainerDefinition, ContainerUpdate, PortMapping, VolumeMount
 from app.services.ansible_executor import prepare_ansible_workspace, run_ansible
-from app.services.compose_service import DEFAULT_DOCKER_VOLS, generate_compose, resolve_hosts
+from app.services.compose_service import DEFAULT_DOCKER_VOLS, generate_compose, generate_env_file, resolve_hosts
 from app.services.container_store import ContainerStore
 from app.services.git_service import GitService
 from app.services.node_store import NodeStore
@@ -698,6 +698,20 @@ async def container_migrate(
         selected_volumes = set(volumes.split(",")) if volumes else None
         all_vol_paths = [_resolve_vol_path(v.host_path) for v in ctr.volumes if v.host_path.strip()]
         vol_paths = [p for p in all_vol_paths if selected_volumes is None or p in selected_volumes]
+        skip_paths = [p for p in all_vol_paths if selected_volumes is not None and p not in selected_volumes]
+
+        # Create empty directories for skipped volumes
+        if skip_paths:
+            await send_step("volumes", "running", f"Creating {len(skip_paths)} empty volume path(s)...")
+            for sp in skip_paths:
+                # For file mounts, create the parent dir; for dirs, create the dir itself
+                # Heuristic: if the last path segment has a dot, it's likely a file
+                last_seg = sp.rsplit("/", 1)[-1] if "/" in sp else sp
+                create_path = sp.rsplit("/", 1)[0] if "." in last_seg else sp
+                await loop.run_in_executor(
+                    None, lambda p=create_path: _ssh_exec(dst_ip, dst_user, dst_pem, f"sudo mkdir -p {p}")
+                )
+
         if vol_paths:
             await send_step("volumes", "running", f"Copying {len(vol_paths)} volume(s)...")
 
@@ -801,12 +815,34 @@ async def container_migrate(
                                         f"sudo docker network create {ctr.network} 2>/dev/null; true")
             )
 
-        # Generate and deploy compose
+        # Build from repo if needed
+        if ctr.build_repo:
+            await send_step("deploy", "running", f"Building image from {ctr.build_repo}...")
+            build_dir = f"/opt/docker/build/{ctr.name}"
+            build_cmd = (
+                f"sudo mkdir -p /opt/docker/build && "
+                f"(if [ -d {build_dir} ]; then "
+                f"cd {build_dir} && sudo git fetch origin {ctr.build_branch} && sudo git reset --hard origin/{ctr.build_branch}; "
+                f"else sudo git clone --depth 1 --branch {ctr.build_branch} {ctr.build_repo} {build_dir}; fi) && "
+                f"cd {build_dir} && sudo docker build -t {ctr.image} -f {ctr.build_dockerfile} {ctr.build_context}"
+            )
+            exit_code, _, stderr = await loop.run_in_executor(
+                None, lambda: _ssh_exec(dst_ip, dst_user, dst_pem, build_cmd)
+            )
+            if exit_code != 0:
+                await send_step("deploy", "error", f"Image build failed: {stderr}")
+                await websocket.close()
+                return
+            await send_step("deploy", "running", f"Image {ctr.image} built successfully")
+
+        # Generate and deploy compose + .env
         all_containers = store.list_all()
+        secret_store = SecretStore(settings.homelab_repo_path)
         dest_containers = [c for c in all_containers if c.enabled and target_host in c.hosts]
         compose_yaml = generate_compose(target_host, dest_containers)
+        env_content = generate_env_file(target_host, dest_containers, secret_store)
 
-        # Upload compose and start
+        # Upload compose, .env, and start
         compose_cmd = (
             f"sudo mkdir -p /opt/docker && "
             f"cat > /tmp/_compose.yml && "
@@ -822,6 +858,21 @@ async def container_migrate(
                 lambda: dst_client.connect(hostname=dst_ip, username=dst_user, pkey=dst_pkey,
                                            timeout=15, look_for_keys=False, allow_agent=False),
             )
+
+            # Upload .env file first if needed
+            if env_content:
+                transport = dst_client.get_transport()
+                env_channel = transport.open_session()
+                env_cmd = (
+                    "cat > /tmp/_docker.env && "
+                    "sudo mv /tmp/_docker.env /opt/docker/.env && "
+                    "sudo chmod 600 /opt/docker/.env"
+                )
+                env_channel.exec_command(f"sudo mkdir -p /opt/docker && {env_cmd}")
+                env_channel.sendall(env_content.encode())
+                env_channel.shutdown_write()
+                await loop.run_in_executor(None, env_channel.recv_exit_status)
+
             transport = dst_client.get_transport()
             channel = transport.open_session()
             channel.exec_command(compose_cmd)
@@ -845,10 +896,11 @@ async def container_migrate(
             None, lambda: _ssh_exec(src_ip, src_user, src_pem, f"sudo docker rm -f {name}")
         )
 
-        # Re-generate compose on source (without the migrated container)
+        # Re-generate compose + .env on source (without the migrated container)
         src_containers = [c for c in all_containers if c.enabled and src in c.hosts and c.name != name]
         if src_containers:
             src_compose = generate_compose(src, src_containers)
+            src_env = generate_env_file(src, src_containers, secret_store)
             src_client_2 = paramiko.SSHClient()
             src_client_2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             src_pkey_2 = _load_private_key(src_pem)
@@ -859,6 +911,19 @@ async def container_migrate(
                                                  timeout=15, look_for_keys=False, allow_agent=False),
                 )
                 t = src_client_2.get_transport()
+
+                # Upload .env
+                if src_env:
+                    env_ch = t.open_session()
+                    env_ch.exec_command(
+                        "cat > /tmp/_docker.env && "
+                        "sudo mv /tmp/_docker.env /opt/docker/.env && "
+                        "sudo chmod 600 /opt/docker/.env"
+                    )
+                    env_ch.sendall(src_env.encode())
+                    env_ch.shutdown_write()
+                    await loop.run_in_executor(None, env_ch.recv_exit_status)
+
                 ch = t.open_session()
                 ch.exec_command(
                     "cat > /tmp/_compose.yml && "

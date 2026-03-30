@@ -16,11 +16,13 @@ class VMDefinition(BaseModel):
     ip: str = ""  # static IP for Ansible connectivity
     template: str = ""
     cpu: int = 2
+    cpu_type: str = "host"
     memory: int = 4096
     disk: int = 32
     image: str = ""
     user: str = "deploy"
     ssh_key: str = ""
+    gpu_passthrough: bool = False
     roles: list[str] = []
 
     @model_validator(mode="before")
@@ -49,11 +51,13 @@ class VMCreate(BaseModel):
     ip: str = ""
     template: str = ""
     cpu: int = 2
+    cpu_type: str = "host"
     memory: int = 4096
     disk: int = 32
     image: str = ""
     user: str = "deploy"
     ssh_key: str = ""
+    gpu_passthrough: bool = False
     roles: list[str] = []
 
 
@@ -63,9 +67,11 @@ class VMUpdate(BaseModel):
     ip: str | None = None
     template: str | None = None
     cpu: int | None = None
+    cpu_type: str | None = None
     memory: int | None = None
     disk: int | None = None
     image: str | None = None
     user: str | None = None
     ssh_key: str | None = None
+    gpu_passthrough: bool | None = None
     roles: list[str] | None = None

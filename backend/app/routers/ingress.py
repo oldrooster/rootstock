@@ -250,3 +250,85 @@ async def caddy_logs(websocket: WebSocket, host_name: str, tail: int = 200):
             await websocket.close()
         except Exception:
             pass
+
+
+# --- Cloudflared container management (restart / logs) ---
+
+
+@router.post("/cloudflared/{host_name}/restart")
+async def restart_cloudflared(host_name: str) -> dict:
+    """Restart the cloudflared container on a host via SSH."""
+    from app.routers.containers import _resolve_host_ssh, _ssh_exec
+
+    ip, user, pem = await _resolve_host_ssh(host_name)
+    loop = asyncio.get_event_loop()
+    exit_code, stdout, stderr = await loop.run_in_executor(
+        None, lambda: _ssh_exec(ip, user, pem, "sudo docker restart cloudflared")
+    )
+    if exit_code != 0:
+        raise HTTPException(502, f"Failed to restart cloudflared: {stderr.strip() or stdout.strip()}")
+    return {"status": "ok", "host": host_name}
+
+
+@router.websocket("/cloudflared/{host_name}/logs")
+async def cloudflared_logs(websocket: WebSocket, host_name: str, tail: int = 200):
+    """Stream cloudflared container logs via SSH WebSocket."""
+    from app.routers.containers import _resolve_host_ssh, _open_ssh_client
+
+    await websocket.accept()
+
+    try:
+        ip, user, pem = await _resolve_host_ssh(host_name)
+    except Exception as e:
+        await websocket.send_text(f"\r\nError: {e}\r\n")
+        await websocket.close()
+        return
+
+    try:
+        client = await _open_ssh_client(ip, user, pem)
+    except Exception as e:
+        await websocket.send_text(f"\r\nSSH connection failed: {e}\r\n")
+        await websocket.close()
+        return
+
+    transport = client.get_transport()
+    channel = transport.open_session()
+    channel.exec_command(f"sudo docker logs -f --tail {tail} cloudflared")
+
+    async def read_stream(is_stderr: bool = False):
+        loop = asyncio.get_event_loop()
+        recv = channel.recv_stderr if is_stderr else channel.recv
+        try:
+            while not channel.closed:
+                data = await loop.run_in_executor(None, lambda: recv(4096))
+                if not data:
+                    break
+                await websocket.send_text(data.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+
+    async def read_ws():
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+
+    try:
+        out_task = asyncio.create_task(read_stream(False))
+        err_task = asyncio.create_task(read_stream(True))
+        ws_task = asyncio.create_task(read_ws())
+        done, pending = await asyncio.wait(
+            [out_task, err_task, ws_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass

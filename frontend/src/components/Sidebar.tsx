@@ -40,11 +40,14 @@ const NAV: NavEntry[] = [
   { to: '/settings', label: 'Settings' },
 ]
 
-function NavItemLink({ to, label, indent, badge }: { to: string; label: string; indent?: boolean; badge?: React.ReactNode }) {
+function NavItemLink({ to, label, indent, badge, onClick }: {
+  to: string; label: string; indent?: boolean; badge?: React.ReactNode; onClick?: () => void
+}) {
   return (
     <li style={{ marginBottom: '0.15rem' }}>
       <NavLink
         to={to}
+        onClick={onClick}
         style={({ isActive }) => ({
           color: isActive ? '#7c9ef8' : indent ? '#8890a0' : '#b0b8d0',
           textDecoration: 'none',
@@ -64,7 +67,7 @@ function NavItemLink({ to, label, indent, badge }: { to: string; label: string; 
   )
 }
 
-function CollapsibleGroup({ label, items }: NavGroup) {
+function CollapsibleGroup({ label, items, onNavigate }: NavGroup & { onNavigate?: () => void }) {
   const location = useLocation()
   const isChildActive = items.some(item => location.pathname.startsWith(item.to))
   const [open, setOpen] = useState(isChildActive)
@@ -94,7 +97,7 @@ function CollapsibleGroup({ label, items }: NavGroup) {
       {open && (
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {items.map(item => (
-            <NavItemLink key={item.to} to={item.to} label={item.label} indent />
+            <NavItemLink key={item.to} to={item.to} label={item.label} indent onClick={onNavigate} />
           ))}
         </ul>
       )}
@@ -113,8 +116,12 @@ const DirtyDot = () => (
   }} />
 )
 
+const MOBILE_BREAKPOINT = 768
+
 export default function Sidebar() {
   const [anyDirty, setAnyDirty] = useState(false)
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const [isMobile, setIsMobile] = useState(window.innerWidth < MOBILE_BREAKPOINT)
 
   useEffect(() => {
     const check = () => {
@@ -128,35 +135,113 @@ export default function Sidebar() {
     return () => clearInterval(interval)
   }, [])
 
-  return (
-    <nav style={{
-      width: '200px',
-      background: '#1a1a2e',
-      padding: '1rem',
-      display: 'flex',
-      flexDirection: 'column',
-    }}>
+  useEffect(() => {
+    const onResize = () => {
+      const mobile = window.innerWidth < MOBILE_BREAKPOINT
+      setIsMobile(mobile)
+      if (!mobile) setMobileOpen(false)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  const closeMobile = () => { if (isMobile) setMobileOpen(false) }
+
+  const navContent = (
+    <>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem', padding: '0 0.5rem' }}>
         <img src={logo} alt="Rootstock" style={{ width: '28px', height: '28px', objectFit: 'contain' }} />
         <h2 style={{ fontSize: '1.1rem', margin: 0 }}>
           <span style={{ color: '#e0e0e0' }}>Root</span>
           <span style={{ color: '#7CC5D4' }}>stock</span>
         </h2>
+        {isMobile && (
+          <button
+            onClick={() => setMobileOpen(false)}
+            style={{
+              marginLeft: 'auto', background: 'transparent', border: 'none',
+              color: '#8890a0', fontSize: '1.2rem', cursor: 'pointer', padding: '0.25rem',
+            }}
+            aria-label="Close menu"
+          >{'\u2715'}</button>
+        )}
       </div>
       <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
         {NAV.map((entry, i) =>
           isGroup(entry) ? (
-            <CollapsibleGroup key={i} {...entry} />
+            <CollapsibleGroup key={i} {...entry} onNavigate={closeMobile} />
           ) : (
             <NavItemLink
               key={entry.to}
               to={entry.to}
               label={entry.label}
               badge={entry.to === '/apply' && anyDirty ? <DirtyDot /> : undefined}
+              onClick={closeMobile}
             />
           )
         )}
       </ul>
-    </nav>
+    </>
+  )
+
+  // Desktop: always visible sidebar
+  if (!isMobile) {
+    return (
+      <nav style={{
+        width: '200px',
+        flexShrink: 0,
+        background: '#1a1a2e',
+        padding: '1rem',
+        display: 'flex',
+        flexDirection: 'column',
+      }}>
+        {navContent}
+      </nav>
+    )
+  }
+
+  // Mobile: hamburger button + slide-out overlay
+  return (
+    <>
+      {/* Hamburger button — fixed top-left */}
+      {!mobileOpen && (
+        <button
+          onClick={() => setMobileOpen(true)}
+          style={{
+            position: 'fixed', top: '0.6rem', left: '0.6rem', zIndex: 1100,
+            background: '#1a1a2e', border: '1px solid #2a2a3e', borderRadius: '6px',
+            color: '#b0b8d0', fontSize: '1.3rem', cursor: 'pointer',
+            width: '2.5rem', height: '2.5rem',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          aria-label="Open menu"
+        >{'\u2630'}</button>
+      )}
+
+      {/* Overlay + drawer */}
+      {mobileOpen && (
+        <>
+          <div
+            onClick={() => setMobileOpen(false)}
+            style={{
+              position: 'fixed', inset: 0, zIndex: 1200,
+              background: 'rgba(0,0,0,0.5)',
+            }}
+          />
+          <nav style={{
+            position: 'fixed', top: 0, left: 0, bottom: 0, zIndex: 1300,
+            width: '220px',
+            background: '#1a1a2e',
+            padding: '1rem',
+            display: 'flex',
+            flexDirection: 'column',
+            overflowY: 'auto',
+            boxShadow: '4px 0 20px rgba(0,0,0,0.4)',
+          }}>
+            {navContent}
+          </nav>
+        </>
+      )}
+    </>
   )
 }

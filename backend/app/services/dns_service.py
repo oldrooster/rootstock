@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from app.models.container import ContainerDefinition
 from app.services import yaml_service
+from app.services.ingress_service import get_manual_rules
 
 
 class DNSRecord(BaseModel):
@@ -76,7 +77,7 @@ def get_all_records(
     repo_path: str,
     host_ip_map: dict[str, str] | None = None,
 ) -> list[DNSRecord]:
-    """Merge DNS records from containers and from dns/records.yml."""
+    """Merge DNS records from containers, manual ingress rules, and static records."""
     records: list[DNSRecord] = []
 
     for ctr in containers:
@@ -92,6 +93,19 @@ def get_all_records(
                 source="container",
                 description=f"from container '{ctr.name}'",
                 host=host,
+            ))
+
+    # Derive DNS entries from manual ingress proxy rules
+    for rule in get_manual_rules(repo_path):
+        ip = (host_ip_map or {}).get(rule.caddy_host, rule.caddy_host)
+        # Avoid duplicating a hostname already present
+        if not any(r.hostname == rule.hostname for r in records):
+            records.append(DNSRecord(
+                hostname=rule.hostname,
+                ip=ip,
+                source="ingress",
+                description=f"from ingress rule '{rule.name}'",
+                host=rule.caddy_host,
             ))
 
     for sr in get_static_records(repo_path):

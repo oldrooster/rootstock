@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 interface AppInfo {
   app_name: string
@@ -10,6 +11,8 @@ interface AppInfo {
 
 interface GlobalSettings {
   docker_vols_base: string
+  backup_target: string
+  backup_schedule: string
 }
 
 interface DNSSettings {
@@ -75,11 +78,69 @@ const btnLink: React.CSSProperties = {
   padding: '0.25rem 0.5rem',
 }
 
+function describeCron(expr: string): string {
+  if (!expr.trim()) return 'Not yet active \u2014 schedule logic coming soon'
+  const parts = expr.trim().split(/\s+/)
+  if (parts.length !== 5) return `Not yet active \u2014 schedule logic coming soon`
+
+  const [min, hour, dom, mon, dow] = parts
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+  const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+  let time = ''
+  if (hour !== '*' && min !== '*') {
+    const h = parseInt(hour)
+    const m = parseInt(min)
+    const ampm = h >= 12 ? 'pm' : 'am'
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h
+    time = m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, '0')}${ampm}`
+  } else if (hour !== '*') {
+    const h = parseInt(hour)
+    const ampm = h >= 12 ? 'pm' : 'am'
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h
+    time = `${h12}${ampm}`
+  } else {
+    time = 'every minute'
+  }
+
+  // Every day
+  if (dom === '*' && mon === '*' && dow === '*') {
+    return `Runs at ${time} every day (not yet active)`
+  }
+  // Specific day(s) of week
+  if (dom === '*' && mon === '*' && dow !== '*') {
+    const dayNames = dow.split(',').map(d => {
+      const n = parseInt(d)
+      return isNaN(n) ? d : (DAYS[n] || d)
+    })
+    if (dayNames.length === 1) return `Runs at ${time} every ${dayNames[0]} (not yet active)`
+    return `Runs at ${time} on ${dayNames.join(', ')} (not yet active)`
+  }
+  // Specific day of month
+  if (dom !== '*' && mon === '*' && dow === '*') {
+    return `Runs at ${time} on day ${dom} of every month (not yet active)`
+  }
+  // Specific month + day
+  if (dom !== '*' && mon !== '*') {
+    const monthName = MONTHS[parseInt(mon)] || mon
+    return `Runs at ${time} on ${monthName} ${dom} (not yet active)`
+  }
+  // Interval patterns
+  if (min.startsWith('*/')) {
+    return `Runs every ${min.slice(2)} minutes (not yet active)`
+  }
+  if (hour.startsWith('*/')) {
+    return `Runs every ${hour.slice(2)} hours (not yet active)`
+  }
+  return `Custom schedule: ${expr} (not yet active)`
+}
+
 export default function Settings() {
   const [data, setData] = useState<AllSettings | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [globalForm, setGlobalForm] = useState<GlobalSettings>({ docker_vols_base: '/var/docker_vols' })
+  const [globalForm, setGlobalForm] = useState<GlobalSettings>({ docker_vols_base: '/var/docker_vols', backup_target: '/mnt/share/backups', backup_schedule: '' })
   const [globalDirty, setGlobalDirty] = useState(false)
+  useUnsavedChanges(globalDirty)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -146,6 +207,29 @@ export default function Settings() {
           <p style={{ color: '#8890a0', fontSize: '0.75rem', margin: '0.35rem 0 0 0' }}>
             Replaces <code style={{ color: '#c084fc' }}>{'${DOCKER_VOLS}'}</code> in container volume paths. Default: /var/docker_vols
           </p>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+          <div>
+            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Backup Target Path</label>
+            <input
+              style={inputStyle}
+              value={globalForm.backup_target}
+              onChange={e => { setGlobalForm({ ...globalForm, backup_target: e.target.value }); setGlobalDirty(true) }}
+              placeholder="/mnt/share/backups"
+            />
+          </div>
+          <div>
+            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Backup Schedule (cron)</label>
+            <input
+              style={inputStyle}
+              value={globalForm.backup_schedule}
+              onChange={e => { setGlobalForm({ ...globalForm, backup_schedule: e.target.value }); setGlobalDirty(true) }}
+              placeholder="0 2 * * *"
+            />
+            <p style={{ color: '#8890a0', fontSize: '0.75rem', margin: '0.35rem 0 0 0' }}>
+              {describeCron(globalForm.backup_schedule)}
+            </p>
+          </div>
         </div>
       </div>
 

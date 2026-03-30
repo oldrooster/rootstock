@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import jsYaml from 'js-yaml'
 import Terminal from '../components/Terminal'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 interface PortMapping { host: number; container: number }
-interface VolumeMount { host_path: string; container_path: string; backup: boolean }
+interface VolumeMount { host_path: string; container_path: string; backup: boolean; backup_exclusions: string[] }
 
 interface Container {
   name: string
@@ -18,10 +19,13 @@ interface Container {
   ports: PortMapping[]
   volumes: VolumeMount[]
   env: Record<string, string>
-  secrets: string[]
+  devices: string[]
   compose_extras: Record<string, unknown>
   network: string | null
-  backup_exclusions: string[]
+  build_repo: string
+  build_branch: string
+  build_dockerfile: string
+  build_context: string
 }
 
 interface HostOption {
@@ -96,6 +100,7 @@ interface FormVolume {
   host_path: string
   container_path: string
   backup: boolean
+  backup_exclusions: string[]
 }
 
 interface FormData {
@@ -112,9 +117,12 @@ interface FormData {
   ports_text: string
   volumes: FormVolume[]
   env_text: string
-  secrets_text: string
+  devices_text: string
   compose_extras_text: string
-  backup_exclusions: string[]
+  build_repo: string
+  build_branch: string
+  build_dockerfile: string
+  build_context: string
 }
 
 const emptyForm: FormData = {
@@ -122,8 +130,10 @@ const emptyForm: FormData = {
   hosts: '', host_rule: '',
   dns_name: '', ingress_mode: 'none', ingress_port: '', external: false,
   network: 'backend',
-  ports_text: '', volumes: [], env_text: '', secrets_text: '',
-  compose_extras_text: '', backup_exclusions: [],
+  ports_text: '', volumes: [], env_text: '',
+  devices_text: '',
+  compose_extras_text: '',
+  build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.',
 }
 
 function containerToForm(c: Container): FormData {
@@ -143,12 +153,16 @@ function containerToForm(c: Container): FormData {
       host_path: v.host_path,
       container_path: v.container_path,
       backup: v.backup,
+      backup_exclusions: v.backup_exclusions || [],
     })),
     env_text: Object.entries(c.env || {}).map(([k, v]) => `${k}=${v}`).join('\n'),
-    secrets_text: (c.secrets || []).join('\n'),
+    devices_text: (c.devices || []).join('\n'),
     compose_extras_text: c.compose_extras && Object.keys(c.compose_extras).length > 0
       ? JSON.stringify(c.compose_extras, null, 2) : '',
-    backup_exclusions: c.backup_exclusions || [],
+    build_repo: c.build_repo || '',
+    build_branch: c.build_branch || 'main',
+    build_dockerfile: c.build_dockerfile || 'Dockerfile',
+    build_context: c.build_context || '.',
   }
 }
 
@@ -180,9 +194,8 @@ function formToPayload(f: FormData) {
     host_path: v.host_path,
     container_path: v.container_path,
     backup: v.backup,
+    backup_exclusions: v.backup_exclusions.filter(Boolean),
   }))
-
-  payload.backup_exclusions = f.backup_exclusions.filter(Boolean)
 
   if (f.env_text.trim()) {
     const env: Record<string, string> = {}
@@ -195,11 +208,21 @@ function formToPayload(f: FormData) {
     payload.env = {}
   }
 
-  payload.secrets = f.secrets_text.trim() ? f.secrets_text.trim().split('\n').filter(Boolean) : []
+
+  if (f.devices_text.trim()) {
+    payload.devices = f.devices_text.trim().split('\n').map(l => l.trim()).filter(Boolean)
+  } else {
+    payload.devices = []
+  }
 
   if (f.compose_extras_text.trim()) {
     try { payload.compose_extras = JSON.parse(f.compose_extras_text) } catch { /* ignore */ }
   }
+
+  payload.build_repo = f.build_repo
+  payload.build_branch = f.build_branch
+  payload.build_dockerfile = f.build_dockerfile
+  payload.build_context = f.build_context
 
   return payload
 }
@@ -266,6 +289,11 @@ function parseComposeYaml(yaml: string): Partial<FormData> & { error?: string } 
       }
     }
 
+    // Devices
+    if (Array.isArray(primary.devices)) {
+      result.devices_text = primary.devices.map((d: string) => String(d)).join('\n')
+    }
+
     // Network
     if (primary.networks) {
       const nets = Array.isArray(primary.networks)
@@ -327,10 +355,22 @@ function VolumeEditor({ volumes, onChange, gap, rowGap }: {
   const [editIdx, setEditIdx] = useState<number | null>(null)
   const [editHost, setEditHost] = useState('')
   const [editContainer, setEditContainer] = useState('')
+  const [exclInput, setExclInput] = useState<Record<number, string>>({})
+
+  function addExclusion(idx: number) {
+    const val = (exclInput[idx] || '').trim()
+    if (!val) return
+    onChange(volumes.map((v, i) => i === idx ? { ...v, backup_exclusions: [...v.backup_exclusions, val] } : v))
+    setExclInput({ ...exclInput, [idx]: '' })
+  }
+
+  function removeExclusion(volIdx: number, exclIdx: number) {
+    onChange(volumes.map((v, i) => i === volIdx ? { ...v, backup_exclusions: v.backup_exclusions.filter((_, j) => j !== exclIdx) } : v))
+  }
 
   function addVolume() {
     if (!hostPath.trim() || !containerPath.trim()) return
-    onChange([...volumes, { host_path: hostPath.trim(), container_path: containerPath.trim(), backup: false }])
+    onChange([...volumes, { host_path: hostPath.trim(), container_path: containerPath.trim(), backup: false, backup_exclusions: [] }])
     setHostPath('${DOCKER_VOLS}/')
     setContainerPath('')
   }
@@ -362,21 +402,21 @@ function VolumeEditor({ volumes, onChange, gap, rowGap }: {
   return (
     <div style={{ marginBottom: gap }}>
       {/* Add row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: gap, marginBottom: volumes.length > 0 ? rowGap : 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: gap, marginBottom: volumes.length > 0 ? rowGap : 0 }}>
         <div>
           <label style={labelStyle}>Host Path</label>
           <input style={inputStyle} value={hostPath} onChange={e => setHostPath(e.target.value)}
             onKeyDown={handleAddKeyDown}
             placeholder="/app/config" />
         </div>
-        <div>
-          <label style={labelStyle}>Container Path</label>
-          <input style={inputStyle} value={containerPath} onChange={e => setContainerPath(e.target.value)}
-            onKeyDown={handleAddKeyDown}
-            placeholder="/config" />
-        </div>
-        <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-          <button style={{ ...btnPrimary, padding: '0.4rem 0.75rem', whiteSpace: 'nowrap' }}
+        <div style={{ display: 'flex', gap: gap, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Container Path</label>
+            <input style={inputStyle} value={containerPath} onChange={e => setContainerPath(e.target.value)}
+              onKeyDown={handleAddKeyDown}
+              placeholder="/config" />
+          </div>
+          <button style={{ ...btnPrimary, padding: '0.4rem 0.75rem', whiteSpace: 'nowrap', flexShrink: 0 }}
             onClick={addVolume} disabled={!hostPath.trim() || !containerPath.trim()}>Add</button>
         </div>
       </div>
@@ -387,84 +427,62 @@ function VolumeEditor({ volumes, onChange, gap, rowGap }: {
           {volumes.map((vol, idx) => (
             <div key={idx}>
               {editIdx === idx ? (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: gap, alignItems: 'end' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: gap, alignItems: 'end' }}>
                   <input style={inputStyle} value={editHost} onChange={e => setEditHost(e.target.value)} />
-                  <input style={inputStyle} value={editContainer} onChange={e => setEditContainer(e.target.value)} />
-                  <div style={{ display: 'flex', gap: '0.35rem' }}>
-                    <button style={{ ...btnPrimary, padding: '0.4rem 0.6rem', fontSize: '0.8rem' }} onClick={saveEdit}>Save</button>
-                    <button style={{ ...btnSecondary, padding: '0.4rem 0.6rem', fontSize: '0.8rem' }} onClick={() => setEditIdx(null)}>Cancel</button>
+                  <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'end' }}>
+                    <input style={{ ...inputStyle, flex: 1 }} value={editContainer} onChange={e => setEditContainer(e.target.value)} />
+                    <button style={{ ...btnPrimary, padding: '0.4rem 0.6rem', fontSize: '0.8rem', flexShrink: 0 }} onClick={saveEdit}>Save</button>
+                    <button style={{ ...btnSecondary, padding: '0.4rem 0.6rem', fontSize: '0.8rem', flexShrink: 0 }} onClick={() => setEditIdx(null)}>Cancel</button>
                   </div>
                 </div>
               ) : (
-                <div style={volRowStyle}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', flexShrink: 0 }}>
-                    <input type="checkbox" checked={vol.backup} onChange={() => toggleBackup(idx)} />
-                    <span style={{ color: '#8890a0', fontSize: '0.75rem' }}>backup</span>
-                  </label>
-                  <span style={{ color: '#e0e0e0', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {vol.host_path}<span style={{ color: '#555' }}>:</span>{vol.container_path}
-                  </span>
-                  <button onClick={() => startEdit(idx)}
-                    style={{ background: 'none', border: 'none', color: '#7c9ef8', cursor: 'pointer', fontSize: '0.8rem', padding: '0 0.25rem' }}>edit</button>
-                  <button onClick={() => removeVolume(idx)}
-                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem', padding: '0 0.25rem' }}>remove</button>
+                <div>
+                  <div style={volRowStyle}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', flexShrink: 0 }}>
+                      <input type="checkbox" checked={vol.backup} onChange={() => toggleBackup(idx)} />
+                      <span style={{ color: '#8890a0', fontSize: '0.75rem' }}>backup</span>
+                    </label>
+                    <span style={{ color: '#e0e0e0', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {vol.host_path}<span style={{ color: '#555' }}>:</span>{vol.container_path}
+                    </span>
+                    <button onClick={() => startEdit(idx)}
+                      style={{ background: 'none', border: 'none', color: '#7c9ef8', cursor: 'pointer', fontSize: '0.8rem', padding: '0 0.25rem' }}>edit</button>
+                    <button onClick={() => removeVolume(idx)}
+                      style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem', padding: '0 0.25rem' }}>remove</button>
+                  </div>
+                  {vol.backup && (
+                    <div style={{ marginLeft: '1.6rem', marginTop: '0.25rem', marginBottom: '0.25rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                        {vol.backup_exclusions.map((excl, ei) => (
+                          <span key={ei} style={{
+                            fontSize: '0.7rem', padding: '0.1rem 0.4rem', borderRadius: '9999px',
+                            background: 'rgba(248,113,113,0.1)', color: '#fca5a5',
+                            display: 'inline-flex', alignItems: 'center', gap: '0.25rem',
+                          }}>
+                            {excl}
+                            <button onClick={() => removeExclusion(idx, ei)}
+                              style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: '0.65rem', padding: 0, lineHeight: 1 }}>&times;</button>
+                          </span>
+                        ))}
+                        <input
+                          style={{ ...inputStyle, width: '120px', fontSize: '0.75rem', padding: '0.15rem 0.4rem' }}
+                          value={exclInput[idx] || ''}
+                          onChange={e => setExclInput({ ...exclInput, [idx]: e.target.value })}
+                          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addExclusion(idx) } }}
+                          placeholder="exclude..."
+                        />
+                        <button onClick={() => addExclusion(idx)}
+                          disabled={!(exclInput[idx] || '').trim()}
+                          style={{ background: 'none', border: 'none', color: '#7c9ef8', cursor: 'pointer', fontSize: '0.7rem', padding: 0 }}>+ add</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           ))}
         </div>
       )}
-    </div>
-  )
-}
-
-/* ── Exclusion Editor ────────────────────────────────────────────── */
-
-function ExclusionEditor({ exclusions, onChange, gap, rowGap }: {
-  exclusions: string[]
-  onChange: (e: string[]) => void
-  gap: string
-  rowGap: string
-}) {
-  const [path, setPath] = useState('')
-
-  function addExclusion() {
-    if (!path.trim()) return
-    onChange([...exclusions, path.trim()])
-    setPath('')
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'Enter') { e.preventDefault(); addExclusion() }
-  }
-
-  return (
-    <div style={{ marginBottom: gap }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: gap, marginBottom: exclusions.length > 0 ? rowGap : 0 }}>
-        <div>
-          <label style={labelStyle}>Path to exclude from backups</label>
-          <input style={inputStyle} value={path} onChange={e => setPath(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="/config/cache" />
-        </div>
-        <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-          <button style={{ ...btnPrimary, padding: '0.4rem 0.75rem' }}
-            onClick={addExclusion} disabled={!path.trim()}>Add</button>
-        </div>
-      </div>
-
-      {exclusions.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-          {exclusions.map((excl, idx) => (
-            <div key={idx} style={volRowStyle}>
-              <span style={{ color: '#e0e0e0', flex: 1, fontFamily: 'monospace', fontSize: '0.85rem' }}>{excl}</span>
-              <button onClick={() => onChange(exclusions.filter((_, i) => i !== idx))}
-                style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem', padding: '0 0.25rem' }}>remove</button>
-            </div>
-          ))}
-        </div>
-      )}
-      <div style={{ color: '#555', fontSize: '0.65rem', marginTop: '0.2rem' }}>Files or folders to exclude from backup (relative to container path)</div>
     </div>
   )
 }
@@ -489,8 +507,9 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
   disableName?: boolean
   hostOptions: HostOption[]
 }) {
+  const [imageMode, setImageMode] = useState<'image' | 'build'>(form.build_repo ? 'build' : 'image')
   const [showAdvanced, setShowAdvanced] = useState(
-    !!(form.env_text || form.secrets_text || form.compose_extras_text)
+    !!(form.env_text || form.devices_text || form.compose_extras_text)
   )
   const [showExtras, setShowExtras] = useState(!!form.compose_extras_text)
   const [showImport, setShowImport] = useState(false)
@@ -520,7 +539,7 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
     setShowImport(false)
     setImportText('')
     // Auto-expand advanced if we imported env/secrets/extras
-    if (fields.env_text || fields.compose_extras_text) {
+    if (fields.env_text || fields.devices_text || fields.compose_extras_text) {
       setShowAdvanced(true)
       if (fields.compose_extras_text) setShowExtras(true)
     }
@@ -567,17 +586,83 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
 
       {/* ── General ──────────────────────────────────────────── */}
       <div style={sectionHeading}>General</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: GAP, marginBottom: SECTION_GAP }}>
-        <div>
-          <label style={labelStyle}>Name</label>
-          <input style={inputStyle} value={form.name} disabled={disableName}
-            onChange={e => set('name', e.target.value)} placeholder="unifi" />
+      <div style={{ marginBottom: SECTION_GAP }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: GAP, marginBottom: ROW_GAP }}>
+          <div>
+            <label style={labelStyle}>Name</label>
+            <input style={inputStyle} value={form.name} disabled={disableName}
+              onChange={e => set('name', e.target.value)} placeholder="unifi" />
+          </div>
         </div>
-        <div>
-          <label style={labelStyle}>Image</label>
-          <input style={inputStyle} value={form.image}
-            onChange={e => set('image', e.target.value)} placeholder="lscr.io/linuxserver/unifi-network-application:latest" />
+
+        {/* Image source tabs */}
+        <div style={{ display: 'flex', gap: '0', marginBottom: '0.75rem' }}>
+          {(['image', 'build'] as const).map((mode, i, arr) => (
+            <button
+              key={mode}
+              style={{
+                padding: '0.35rem 0.75rem', fontSize: '0.8rem', cursor: 'pointer',
+                border: '1px solid #2a2a3e',
+                borderLeft: i === 0 ? '1px solid #2a2a3e' : 'none',
+                borderRadius: i === 0 ? '4px 0 0 4px' : i === arr.length - 1 ? '0 4px 4px 0' : '0',
+                background: imageMode === mode ? '#2a2a3e' : 'transparent',
+                color: imageMode === mode ? '#e0e0e0' : '#6b7280',
+              }}
+              onClick={() => {
+                setImageMode(mode)
+                if (mode === 'image') {
+                  setForm({ ...form, build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.', image: '' })
+                } else {
+                  setForm({ ...form, image: '' })
+                }
+              }}
+            >{{ image: 'Pull Image', build: 'Build from Repo' }[mode]}</button>
+          ))}
         </div>
+
+        {imageMode === 'image' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: GAP }}>
+            <div>
+              <label style={labelStyle}>Image</label>
+              <input style={inputStyle} value={form.image}
+                onChange={e => set('image', e.target.value)} placeholder="lscr.io/linuxserver/unifi-network-application:latest" />
+            </div>
+          </div>
+        )}
+
+        {imageMode === 'build' && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: GAP, marginBottom: ROW_GAP }}>
+              <div>
+                <label style={labelStyle}>Repository URL</label>
+                <input style={inputStyle} value={form.build_repo}
+                  onChange={e => set('build_repo', e.target.value)} placeholder="https://github.com/user/repo.git" />
+              </div>
+              <div>
+                <label style={labelStyle}>Image Tag</label>
+                <input style={inputStyle} value={form.image}
+                  onChange={e => set('image', e.target.value)} placeholder="my-app:latest" />
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: GAP }}>
+              <div>
+                <label style={labelStyle}>Branch</label>
+                <input style={inputStyle} value={form.build_branch}
+                  onChange={e => set('build_branch', e.target.value)} placeholder="main" />
+              </div>
+              <div>
+                <label style={labelStyle}>Dockerfile</label>
+                <input style={inputStyle} value={form.build_dockerfile}
+                  onChange={e => set('build_dockerfile', e.target.value)} placeholder="Dockerfile" />
+              </div>
+              <div>
+                <label style={labelStyle}>Build Context</label>
+                <input style={inputStyle} value={form.build_context}
+                  onChange={e => set('build_context', e.target.value)} placeholder="." />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Hosts ────────────────────────────────────────────── */}
@@ -654,19 +739,6 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
         rowGap={ROW_GAP}
       />
 
-      {/* ── Backup Exclusions (only if any volume has backup) ── */}
-      {form.volumes.some(v => v.backup) && (
-        <>
-          <div style={sectionHeading}>Backup Exclusions</div>
-          <ExclusionEditor
-            exclusions={form.backup_exclusions}
-            onChange={excl => setForm({ ...form, backup_exclusions: excl })}
-            gap={GAP}
-            rowGap={ROW_GAP}
-          />
-        </>
-      )}
-
       {/* ── Advanced (collapsible) ───────────────────────────── */}
       <div
         style={{ ...sectionHeading, cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
@@ -679,13 +751,16 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
         <div style={{ marginBottom: SECTION_GAP }}>
           <div style={{ marginBottom: ROW_GAP }}>
             <label style={labelStyle}>Environment Variables (KEY=VALUE per line)</label>
-            <textarea style={{ ...inputStyle, minHeight: '2.5rem', resize: 'vertical', fontFamily: 'monospace' }} value={form.env_text}
-              onChange={e => set('env_text', e.target.value)} placeholder="TZ=Pacific/Auckland&#10;PUID=1000" />
+            <textarea style={{ ...inputStyle, minHeight: '5.5rem', resize: 'vertical', fontFamily: 'monospace' }} value={form.env_text}
+              onChange={e => set('env_text', e.target.value)} placeholder={'TZ=Pacific/Auckland\nPUID=1000\nAPI_KEY=${secret:myapp/api_key}'} />
+            <p style={{ color: '#6b7280', fontSize: '0.7rem', margin: '0.25rem 0 0 0' }}>
+              Use <code style={{ color: '#c084fc' }}>{'${secret:path/to/key}'}</code> to reference secrets from the store
+            </p>
           </div>
           <div style={{ marginBottom: ROW_GAP }}>
-            <label style={labelStyle}>Secrets (secret store refs, one per line)</label>
-            <textarea style={{ ...inputStyle, minHeight: '2.2rem', resize: 'vertical', fontFamily: 'monospace' }} value={form.secrets_text}
-              onChange={e => set('secrets_text', e.target.value)} placeholder="unifi/mongo_password&#10;unifi/admin_password" />
+            <label style={labelStyle}>Devices (one per line, e.g. /dev/dri:/dev/dri)</label>
+            <textarea style={{ ...inputStyle, minHeight: '2.5rem', resize: 'vertical', fontFamily: 'monospace' }} value={form.devices_text}
+              onChange={e => set('devices_text', e.target.value)} placeholder={'/dev/dri:/dev/dri'} />
           </div>
           <div>
             <div
@@ -734,6 +809,8 @@ export default function Containers() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [composePreview, setComposePreview] = useState<{ host: string; yaml: string } | null>(null)
 
+  useUnsavedChanges(showAdd || editingName !== null)
+
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{ name: string; host: string; x: number; y: number } | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
@@ -749,6 +826,9 @@ export default function Containers() {
   const [logLines, setLogLines] = useState<string[]>([])
   const logWsRef = useRef<WebSocket | null>(null)
   const logEndRef = useRef<HTMLDivElement>(null)
+
+  // Host filter
+  const [hostFilter, setHostFilter] = useState<string | null>(null)
 
   // Migration state
   interface MigrateStep { step: string; status: string; detail: string }
@@ -1154,11 +1234,48 @@ export default function Containers() {
         </div>
       )}
 
+      {/* Host filter bar */}
+      {containers.length > 0 && (() => {
+        const allHosts = [...new Set(containers.flatMap(c => c.hosts))].sort()
+        if (allHosts.length <= 1) return null
+        return (
+          <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginRight: '0.25rem' }}>Filter:</span>
+            <button
+              style={{
+                fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '9999px', cursor: 'pointer',
+                border: '1px solid #2a2a3e',
+                background: hostFilter === null ? '#7c9ef8' : 'transparent',
+                color: hostFilter === null ? '#0f0f1a' : '#b0b8d0',
+                fontWeight: hostFilter === null ? 600 : 400,
+              }}
+              onClick={() => setHostFilter(null)}
+            >All ({containers.length})</button>
+            {allHosts.map(h => {
+              const count = containers.filter(c => c.hosts.includes(h)).length
+              const active = hostFilter === h
+              return (
+                <button key={h}
+                  style={{
+                    fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '9999px', cursor: 'pointer',
+                    border: '1px solid #2a2a3e',
+                    background: active ? '#7c9ef8' : 'transparent',
+                    color: active ? '#0f0f1a' : '#b0b8d0',
+                    fontWeight: active ? 600 : 400,
+                  }}
+                  onClick={() => setHostFilter(active ? null : h)}
+                >{h} ({count})</button>
+              )
+            })}
+          </div>
+        )
+      })()}
+
       {containers.length === 0 && !showAdd && (
         <p style={{ color: '#8890a0' }}>No containers defined yet.</p>
       )}
 
-      {containers.map(ctr => (
+      {containers.filter(ctr => !hostFilter || ctr.hosts.includes(hostFilter)).map(ctr => (
         <div key={ctr.name} style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', marginBottom: '0.75rem' }}>
           {editingName === ctr.name ? (
             <ContainerForm
@@ -1262,6 +1379,12 @@ export default function Containers() {
                     <>
                       <span style={{ margin: '0 0.75rem' }}>|</span>
                       <span>Sidecars: {Object.keys(ctr.compose_extras).join(', ')}</span>
+                    </>
+                  )}
+                  {ctr.build_repo && (
+                    <>
+                      <span style={{ margin: '0 0.75rem' }}>|</span>
+                      <span style={{ color: '#a78bfa' }}>Build: {ctr.build_repo.replace(/.*\//, '').replace(/\.git$/, '')}</span>
                     </>
                   )}
                 </div>
@@ -1452,8 +1575,9 @@ export default function Containers() {
                   return (
                     <div style={{ marginBottom: '1rem' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
-                        <label style={{ ...labelStyle, marginBottom: 0 }}>Volumes to migrate</label>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <label style={{ ...labelStyle, marginBottom: 0 }}>Volumes</label>
+                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                          <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>Copy data:</span>
                           <button
                             style={{ background: 'none', border: 'none', color: '#7c9ef8', fontSize: '0.7rem', cursor: 'pointer' }}
                             onClick={() => setMigrateVolumes(new Set(vols.map(v => resolveVolPath(v.host_path))))}
@@ -1467,11 +1591,13 @@ export default function Containers() {
                       <div style={{ background: '#0f0f1a', border: '1px solid #2a2a3e', borderRadius: '4px', padding: '0.4rem 0.6rem' }}>
                         {vols.map((v, i) => {
                           const resolved = resolveVolPath(v.host_path)
+                          const checked = migrateVolumes.has(resolved)
+                          const isFile = resolved.split('/').pop()?.includes('.') || false
                           return (
-                            <label key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.2rem 0', cursor: 'pointer' }}>
+                            <label key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.25rem 0', cursor: 'pointer' }}>
                               <input
                                 type="checkbox"
-                                checked={migrateVolumes.has(resolved)}
+                                checked={checked}
                                 onChange={e => {
                                   const next = new Set(migrateVolumes)
                                   if (e.target.checked) next.add(resolved)
@@ -1479,8 +1605,13 @@ export default function Containers() {
                                   setMigrateVolumes(next)
                                 }}
                               />
-                              <span style={{ color: '#e0e0e0', fontSize: '0.8rem', fontFamily: 'monospace' }}>{resolved}</span>
-                              <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>{v.container_path}</span>
+                              <span style={{ color: '#e0e0e0', fontSize: '0.8rem', fontFamily: 'monospace', flex: 1, minWidth: 0 }}>{resolved}</span>
+                              {isFile && <span style={{ color: '#f59e0b', fontSize: '0.65rem', padding: '0.05rem 0.3rem', background: 'rgba(245,158,11,0.12)', borderRadius: '9999px' }}>file</span>}
+                              <span style={{
+                                fontSize: '0.65rem', padding: '0.05rem 0.3rem', borderRadius: '9999px',
+                                background: checked ? 'rgba(34,197,94,0.12)' : 'rgba(136,144,160,0.12)',
+                                color: checked ? '#22c55e' : '#8890a0',
+                              }}>{checked ? 'copy data' : 'create empty'}</span>
                             </label>
                           )
                         })}

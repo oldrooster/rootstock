@@ -16,8 +16,11 @@ class ManualRule(BaseModel):
 class IngressSettings(BaseModel):
     wildcard_domain: str = ""
     cloudflare_api_token_secret: str = ""  # ref to SecretStore key
+    cloudflare_account_id: str = ""  # optional: skip API account lookup
     acme_email: str = ""
     docker_network: str = "backend"
+    tunnel_token_secret: str = ""  # default tunnel token secret (used if host not in tunnel_tokens)
+    tunnel_tokens: dict[str, str] = {}  # host -> SecretStore key for per-host tunnel tokens
 
 
 def _rules_path(repo_path: str) -> Path:

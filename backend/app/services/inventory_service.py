@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict
 from io import StringIO
 
@@ -5,6 +6,11 @@ from ruamel.yaml import YAML
 
 from app.models.node import NodeDefinition
 from app.models.vm import VMDefinition
+
+
+def safe_group_name(name: str) -> str:
+    """Convert a role name to a valid Ansible group name (alphanumeric + underscores)."""
+    return re.sub(r"[^a-zA-Z0-9_]", "_", name)
 
 
 def generate_inventory(
@@ -32,7 +38,7 @@ def generate_inventory(
                 host_vars["ansible_ssh_private_key_file"] = ssh_key_files[node.name]
             all_hosts[node.name] = dict(host_vars)
             for role in node.roles:
-                groups[role]["hosts"][node.name] = dict(host_vars)
+                groups[safe_group_name(role)]["hosts"][node.name] = dict(host_vars)
 
     for vm in vms:
         if not vm.enabled:
@@ -45,7 +51,7 @@ def generate_inventory(
             host_vars["ansible_ssh_private_key_file"] = ssh_key_files[vm.name]
         all_hosts[vm.name] = dict(host_vars)
         for role in vm.roles:
-            groups[role]["hosts"][vm.name] = dict(host_vars)
+            groups[safe_group_name(role)]["hosts"][vm.name] = dict(host_vars)
 
     if not all_hosts:
         return "# No hosts defined\nall:\n  hosts: {}\n"
