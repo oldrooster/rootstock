@@ -210,6 +210,39 @@ def ensure_tunnel_dns(
         logger.info("Created DNS CNAME %s -> %s", hostname, tunnel_target)
 
 
+def update_tunnel_ingress(
+    api_token: str,
+    account_id: str,
+    tunnel_id: str,
+    hostnames: list[str],
+    origin_service: str = "https://caddy:443",
+) -> None:
+    """Push ingress rules to the Cloudflare API for a remotely-managed tunnel.
+
+    This configures the tunnel so cloudflared knows how to route traffic.
+    Without this, cloudflared returns 503 for all requests.
+    """
+    ingress_rules: list[dict] = []
+    for hostname in hostnames:
+        ingress_rules.append({
+            "hostname": hostname,
+            "service": origin_service,
+            "originRequest": {"noTLSVerify": True},
+        })
+    # Catch-all rule (required by CF API)
+    ingress_rules.append({"service": "http_status:404"})
+
+    r = httpx.put(
+        f"{CF_API_BASE}/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+        headers=_cf_headers(api_token),
+        json={"config": {"ingress": ingress_rules}},
+    )
+    if not r.is_success:
+        detail = r.json().get("errors", r.text)
+        raise RuntimeError(f"Failed to update tunnel ingress config: {detail}")
+    logger.info("Updated tunnel %s ingress with %d hostname(s)", tunnel_id, len(hostnames))
+
+
 def ensure_tunnel_for_host(
     api_token: str,
     account_id: str,
@@ -220,6 +253,7 @@ def ensure_tunnel_for_host(
     """Ensure a tunnel exists for a host, create DNS records, and return the tunnel token.
 
     - Creates tunnel named 'rootstock-{host}' if it doesn't exist
+    - Pushes ingress rules to the Cloudflare API
     - Creates CNAME DNS records for each hostname pointing to the tunnel
     - Returns the tunnel connector token
     """
@@ -236,6 +270,10 @@ def ensure_tunnel_for_host(
         tunnel = create_tunnel(api_token, account_id, tunnel_name)
         tunnel_id = tunnel["id"]
         logger.info("Created tunnel '%s' (id=%s)", tunnel_name, tunnel_id)
+
+    # Push ingress rules to CF API so cloudflared knows how to route traffic
+    if hostnames:
+        update_tunnel_ingress(api_token, account_id, tunnel_id, hostnames)
 
     # Create DNS records if zone_id provided
     if zone_id:

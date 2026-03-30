@@ -674,15 +674,16 @@ def _write_ingress_playbook(
                     logger.warning("Could not resolve tunnel token secret '%s' for host %s",
                                    secret_key, host)
 
-    # Auto-provision tunnels for hosts without tokens if CF API token is available
-    missing_token_hosts = {h for h in tunnel_hosts if h not in host_tunnel_tokens}
-    if missing_token_hosts and cf_token and secret_store:
+    # Auto-provision tunnels and sync ingress rules via CF API
+    if cf_token and secret_store and tunnel_hosts:
         try:
             from app.services.cloudflare_service import (
                 collect_external_hostnames,
                 ensure_tunnel_for_host,
                 get_account_id,
                 get_zone_id,
+                update_tunnel_ingress,
+                list_tunnels,
             )
             account_id = ingress_settings.cloudflare_account_id or get_account_id(cf_token)
 
@@ -696,19 +697,46 @@ def _write_ingress_playbook(
                 except Exception as e:
                     logger.warning("Could not get zone ID for %s: %s", base_domain, e)
 
+            # For hosts without tokens: full provision (create tunnel + ingress + DNS + token)
+            missing_token_hosts = {h for h in tunnel_hosts if h not in host_tunnel_tokens}
             for host in sorted(missing_token_hosts):
                 try:
                     hostnames = collect_external_hostnames(host, containers, manual_rules)
                     token = ensure_tunnel_for_host(
                         cf_token, account_id, host, hostnames, zone_id,
                     )
-                    # Store the token in the secret store for future use
                     secret_key = f"cloudflare/tunnel_token_{host}"
                     secret_store.set(secret_key, token)
                     host_tunnel_tokens[host] = token
                     logger.info("Auto-provisioned tunnel for %s, stored as secret '%s'", host, secret_key)
                 except Exception as e:
                     logger.warning("Failed to auto-provision tunnel for %s: %s", host, e)
+
+            # For hosts that already have tokens: still sync ingress rules and DNS
+            # (handles newly added containers/manual rules)
+            existing_token_hosts = {h for h in tunnel_hosts if h in host_tunnel_tokens} - missing_token_hosts
+            if existing_token_hosts:
+                try:
+                    tunnels = list_tunnels(cf_token, account_id)
+                    for host in sorted(existing_token_hosts):
+                        tunnel_name = f"rootstock-{host}"
+                        tunnel = next((t for t in tunnels if t["name"] == tunnel_name), None)
+                        if tunnel:
+                            hostnames = collect_external_hostnames(host, containers, manual_rules)
+                            if hostnames:
+                                try:
+                                    update_tunnel_ingress(cf_token, account_id, tunnel["id"], hostnames)
+                                except Exception as e:
+                                    logger.warning("Failed to update ingress for %s: %s", host, e)
+                                if zone_id:
+                                    for hostname in hostnames:
+                                        try:
+                                            from app.services.cloudflare_service import ensure_tunnel_dns
+                                            ensure_tunnel_dns(cf_token, account_id, zone_id, tunnel["id"], hostname)
+                                        except Exception as e:
+                                            logger.warning("Failed to update DNS for %s: %s", hostname, e)
+                except Exception as e:
+                    logger.warning("Failed to sync existing tunnel configs: %s", e)
         except Exception as e:
             logger.warning("Failed to auto-provision tunnels: %s", e)
 

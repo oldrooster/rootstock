@@ -101,6 +101,13 @@ export default function Ingress() {
   const caddyLogWsRef = useRef<WebSocket | null>(null)
   const caddyLogEndRef = useRef<HTMLDivElement>(null)
 
+  // Cloudflared management
+  const [restartingCfdHost, setRestartingCfdHost] = useState<string | null>(null)
+  const [cfdLogHost, setCfdLogHost] = useState<string | null>(null)
+  const [cfdLogLines, setCfdLogLines] = useState<string[]>([])
+  const cfdLogWsRef = useRef<WebSocket | null>(null)
+  const cfdLogEndRef = useRef<HTMLDivElement>(null)
+
   const fetchAll = () => {
     setLoading(true)
     Promise.all([
@@ -125,6 +132,10 @@ export default function Ingress() {
   useEffect(() => {
     caddyLogEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [caddyLogLines])
+
+  useEffect(() => {
+    cfdLogEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [cfdLogLines])
 
   async function restartCaddy(host: string) {
     setRestartingHost(host)
@@ -169,6 +180,50 @@ export default function Ingress() {
     if (caddyLogWsRef.current) { caddyLogWsRef.current.close(); caddyLogWsRef.current = null }
     setCaddyLogHost(null)
     setCaddyLogLines([])
+  }
+
+  async function restartCloudflared(host: string) {
+    setRestartingCfdHost(host)
+    try {
+      const r = await fetch(`/api/ingress/cloudflared/${encodeURIComponent(host)}/restart`, { method: 'POST' })
+      if (!r.ok) {
+        const data = await r.json().catch(() => null)
+        throw new Error(data?.detail || `HTTP ${r.status}`)
+      }
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setRestartingCfdHost(null)
+    }
+  }
+
+  function openCloudflaredLogs(host: string) {
+    if (cfdLogWsRef.current) { cfdLogWsRef.current.close(); cfdLogWsRef.current = null }
+    setCfdLogLines([])
+    setCfdLogHost(host)
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(
+      `${protocol}//${window.location.host}/api/ingress/cloudflared/${encodeURIComponent(host)}/logs`
+    )
+    cfdLogWsRef.current = ws
+
+    let buffer = ''
+    ws.onmessage = (e) => {
+      buffer += e.data
+      const parts = buffer.split('\n')
+      buffer = parts.pop() || ''
+      if (parts.length > 0) {
+        setCfdLogLines(prev => [...prev, ...parts].slice(-500))
+      }
+    }
+    ws.onclose = () => {}
+  }
+
+  function closeCloudflaredLogs() {
+    if (cfdLogWsRef.current) { cfdLogWsRef.current.close(); cfdLogWsRef.current = null }
+    setCfdLogHost(null)
+    setCfdLogLines([])
   }
 
   // Group rules by caddy_host
@@ -269,19 +324,33 @@ export default function Ingress() {
                 <Fragment key={host}>
                   <tr>
                     <td colSpan={7} style={{ padding: '0.75rem 0.75rem 0.3rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                         <span style={{ color: '#7c9ef8', fontSize: '0.9rem', fontWeight: 600 }}>{host}</span>
                         <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }} onClick={() => loadPreview('caddyfile', host)}>Caddyfile</button>
                         <button style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem' }} onClick={() => loadPreview('tunnel', host)}>Tunnel</button>
                         <button
                           style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#22c55e', color: '#22c55e' }}
                           onClick={() => openCaddyLogs(host)}
-                        >Logs</button>
+                        >Caddy Logs</button>
                         <button
                           style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#f59e0b', color: '#f59e0b' }}
                           onClick={() => restartCaddy(host)}
                           disabled={restartingHost === host}
-                        >{restartingHost === host ? 'Restarting...' : 'Restart'}</button>
+                        >{restartingHost === host ? 'Restarting...' : 'Restart Caddy'}</button>
+                        {hostRules.some(r => r.external) && (
+                          <>
+                            <span style={{ color: '#2a2a3e' }}>|</span>
+                            <button
+                              style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#a78bfa', color: '#a78bfa' }}
+                              onClick={() => openCloudflaredLogs(host)}
+                            >CFD Logs</button>
+                            <button
+                              style={{ ...btnSecondary, fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderColor: '#fb923c', color: '#fb923c' }}
+                              onClick={() => restartCloudflared(host)}
+                              disabled={restartingCfdHost === host}
+                            >{restartingCfdHost === host ? 'Restarting...' : 'Restart CFD'}</button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -361,6 +430,32 @@ export default function Ingress() {
               ))
             )}
             <div ref={caddyLogEndRef} />
+          </div>
+        </div>
+      )}
+
+      {/* Cloudflared Logs */}
+      {cfdLogHost && (
+        <div style={cardStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <h2 style={{ color: '#e0e0e0', fontSize: '1rem', margin: 0 }}>
+              Cloudflared Logs: <span style={{ color: '#a78bfa' }}>{cfdLogHost}</span>
+            </h2>
+            <button style={btnSecondary} onClick={closeCloudflaredLogs}>Close</button>
+          </div>
+          <div style={{
+            background: '#0a0a14', border: '1px solid #2a2a3e', borderRadius: '4px',
+            padding: '0.75rem', maxHeight: '400px', overflow: 'auto',
+            fontFamily: 'monospace', fontSize: '0.75rem', lineHeight: 1.5,
+          }}>
+            {cfdLogLines.length === 0 ? (
+              <span style={{ color: '#6b7280' }}>Connecting...</span>
+            ) : (
+              cfdLogLines.map((line, i) => (
+                <div key={i} style={{ color: '#c8d0e0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{line}</div>
+              ))
+            )}
+            <div ref={cfdLogEndRef} />
           </div>
         </div>
       )}
