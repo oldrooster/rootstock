@@ -182,7 +182,7 @@ function FileEditor({ roleName, onBack }: { roleName: string; onBack: () => void
   }
 
   function TreeNode({ node, prefix }: { node: ReturnType<typeof buildTree>[0]; prefix: string }) {
-    const fullPath = node.path ? (prefix ? prefix + '/' + node.path : node.path) : undefined
+    const _fullPath = node.path ? (prefix ? prefix + '/' + node.path : node.path) : undefined
     // For directory nodes, recalculate full paths for children
     const dirPrefix = node.children ? (prefix ? prefix + '/' + node.label.replace('/', '') : node.label.replace('/', '')) : prefix
 

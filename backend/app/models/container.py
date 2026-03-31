@@ -42,6 +42,7 @@ class ContainerDefinition(BaseModel):
     build_branch: str = "main"
     build_dockerfile: str = "Dockerfile"
     build_context: str = "."
+    build_target: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -103,6 +104,7 @@ class ContainerCreate(BaseModel):
     build_branch: str = "main"
     build_dockerfile: str = "Dockerfile"
     build_context: str = "."
+    build_target: str = ""
 
 
 class ContainerUpdate(BaseModel):
@@ -124,3 +126,4 @@ class ContainerUpdate(BaseModel):
     build_branch: str | None = None
     build_dockerfile: str | None = None
     build_context: str | None = None
+    build_target: str | None = None

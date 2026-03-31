@@ -25,7 +25,7 @@ export function useUnsavedChanges(isDirty: boolean) {
     }
 
     // Back/forward button
-    const onPopState = (e: PopStateEvent) => {
+    const onPopState = (_e: PopStateEvent) => {
       const ok = window.confirm('You have unsaved changes. Leave without saving?')
       if (!ok) {
         // Push back to current URL to undo the back navigation

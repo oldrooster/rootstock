@@ -26,6 +26,7 @@ interface Container {
   build_branch: string
   build_dockerfile: string
   build_context: string
+  build_target: string
 }
 
 interface HostOption {
@@ -123,6 +124,7 @@ interface FormData {
   build_branch: string
   build_dockerfile: string
   build_context: string
+  build_target: string
 }
 
 const emptyForm: FormData = {
@@ -133,7 +135,7 @@ const emptyForm: FormData = {
   ports_text: '', volumes: [], env_text: '',
   devices_text: '',
   compose_extras_text: '',
-  build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.',
+  build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.', build_target: '',
 }
 
 function containerToForm(c: Container): FormData {
@@ -163,6 +165,7 @@ function containerToForm(c: Container): FormData {
     build_branch: c.build_branch || 'main',
     build_dockerfile: c.build_dockerfile || 'Dockerfile',
     build_context: c.build_context || '.',
+    build_target: c.build_target || '',
   }
 }
 
@@ -223,6 +226,7 @@ function formToPayload(f: FormData) {
   payload.build_branch = f.build_branch
   payload.build_dockerfile = f.build_dockerfile
   payload.build_context = f.build_context
+  payload.build_target = f.build_target
 
   return payload
 }
@@ -611,7 +615,7 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
               onClick={() => {
                 setImageMode(mode)
                 if (mode === 'image') {
-                  setForm({ ...form, build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.', image: '' })
+                  setForm({ ...form, build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.', build_target: '', image: '' })
                 } else {
                   setForm({ ...form, image: '' })
                 }
@@ -644,7 +648,7 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
                   onChange={e => set('image', e.target.value)} placeholder="my-app:latest" />
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: GAP }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: GAP }}>
               <div>
                 <label style={labelStyle}>Branch</label>
                 <input style={inputStyle} value={form.build_branch}
@@ -659,6 +663,11 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
                 <label style={labelStyle}>Build Context</label>
                 <input style={inputStyle} value={form.build_context}
                   onChange={e => set('build_context', e.target.value)} placeholder="." />
+              </div>
+              <div>
+                <label style={labelStyle}>Build Target</label>
+                <input style={inputStyle} value={form.build_target}
+                  onChange={e => set('build_target', e.target.value)} placeholder="e.g. prod" />
               </div>
             </div>
           </div>

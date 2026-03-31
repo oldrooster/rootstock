@@ -311,6 +311,7 @@ interface DiscoveredVM {
   vmid: number
   status: string
   cpu: number
+  cpu_type: string
   memory: number
   disk: number
   ip: string

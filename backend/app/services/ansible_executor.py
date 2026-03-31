@@ -276,9 +276,14 @@ def _write_containers_playbook(
             f"        force: true\n"
             + when_clause
         )
+        target_flag = f" --target {ctr.build_target}" if ctr.build_target else ""
+        # Resolve Dockerfile path relative to repo root (chdir), not build context
+        dockerfile_path = ctr.build_dockerfile
+        if ctr.build_context != "." and "/" not in ctr.build_dockerfile:
+            dockerfile_path = f"{ctr.build_context}/{ctr.build_dockerfile}".replace("//", "/")
         tasks.append(
             f"    - name: Build image for '{ctr.name}'\n"
-            f"      command: docker build -t {ctr.image} -f {ctr.build_dockerfile} {ctr.build_context}\n"
+            f"      command: docker build -t {ctr.image} -f {dockerfile_path}{target_flag} {ctr.build_context}\n"
             f"      args:\n"
             f"        chdir: {build_dir}\n"
             + when_clause
