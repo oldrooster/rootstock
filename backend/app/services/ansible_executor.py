@@ -98,6 +98,8 @@ def prepare_ansible_workspace(
     secret_store: SecretStore | None = None,
     templates: list[TemplateDefinition] | None = None,
     filter_roles: set[str] | None = None,
+    filter_containers: set[str] | None = None,
+    filter_hosts: set[str] | None = None,
 ) -> None:
     """Prepare Ansible workspace files for the given scope."""
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -123,11 +125,16 @@ def prepare_ansible_workspace(
         gs = get_global_settings(repo_path)
         _write_roles_playbook(workspace_dir, vms, nodes, filter_roles, gs.role_order)
     elif scope == "containers":
-        _write_containers_playbook(workspace_dir, repo_path, containers or [], nodes, vms, secret_store)
+        ctr_list = containers or []
+        if filter_containers:
+            ctr_list = [c for c in ctr_list if c.name in filter_containers]
+        _write_containers_playbook(workspace_dir, repo_path, ctr_list, nodes, vms, secret_store)
     elif scope == "dns":
         _write_dns_playbook(workspace_dir, repo_path, containers or [], nodes, vms)
     elif scope == "ingress":
-        _write_ingress_playbook(workspace_dir, repo_path, containers or [], nodes, vms, secret_store)
+        _write_ingress_playbook(workspace_dir, repo_path, containers or [], nodes, vms, secret_store, filter_hosts)
+    elif scope == "backups":
+        _write_backups_playbook(workspace_dir, repo_path, containers or [], nodes, vms, secret_store, filter_hosts)
 
 
 def _collect_hosts_with_roles(
@@ -203,12 +210,14 @@ def _write_containers_playbook(
     files_dir.mkdir(parents=True, exist_ok=True)
 
     # Collect all hosts and networks used by containers
+    # Docker predefined networks cannot be created via `docker network create`
+    PREDEFINED_NETWORKS = {"host", "bridge", "none"}
     all_hosts: set[str] = set()
     all_networks: set[str] = set()
     for ctr in containers:
         if ctr.enabled:
             all_hosts.update(ctr.hosts)
-            if ctr.network:
+            if ctr.network and ctr.network not in PREDEFINED_NETWORKS:
                 all_networks.add(ctr.network)
 
     has_env_file = False
@@ -531,6 +540,7 @@ def _write_ingress_playbook(
     nodes: list[NodeDefinition],
     vms: list[VMDefinition],
     secret_store: SecretStore | None = None,
+    filter_hosts: set[str] | None = None,
 ) -> None:
     """Generate playbook to deploy Caddy container + cloudflared configs per host."""
     ingress_settings = get_ingress_settings(repo_path)
@@ -552,6 +562,10 @@ def _write_ingress_playbook(
             caddy_hosts.update(ctr.hosts)
     for rule in manual_rules:
         caddy_hosts.add(rule.caddy_host)
+
+    # Filter to selected hosts if specified
+    if filter_hosts:
+        caddy_hosts = caddy_hosts & filter_hosts
 
     files_dir = workspace_dir / "files"
     caddy_dir = files_dir / "caddy"
@@ -683,7 +697,9 @@ def _write_ingress_playbook(
     if cf_token and secret_store and tunnel_hosts:
         try:
             from app.services.cloudflare_service import (
-                collect_external_hostnames,
+                collect_external_routes,
+                ensure_ssl_full,
+                ensure_tunnel_dns,
                 ensure_tunnel_for_host,
                 get_account_id,
                 get_zone_id,
@@ -699,6 +715,8 @@ def _write_ingress_playbook(
                 base_domain = ingress_settings.wildcard_domain.lstrip("*.")
                 try:
                     zone_id = get_zone_id(cf_token, base_domain)
+                    # Ensure SSL mode is Full to avoid redirect loops with tunnels
+                    ensure_ssl_full(cf_token, zone_id)
                 except Exception as e:
                     logger.warning("Could not get zone ID for %s: %s", base_domain, e)
 
@@ -706,9 +724,9 @@ def _write_ingress_playbook(
             missing_token_hosts = {h for h in tunnel_hosts if h not in host_tunnel_tokens}
             for host in sorted(missing_token_hosts):
                 try:
-                    hostnames = collect_external_hostnames(host, containers, manual_rules)
+                    routes = collect_external_routes(host, containers, manual_rules)
                     token = ensure_tunnel_for_host(
-                        cf_token, account_id, host, hostnames, zone_id,
+                        cf_token, account_id, host, routes, zone_id,
                     )
                     secret_key = f"cloudflare/tunnel_token_{host}"
                     secret_store.set(secret_key, token)
@@ -727,16 +745,15 @@ def _write_ingress_playbook(
                         tunnel_name = f"rootstock-{host}"
                         tunnel = next((t for t in tunnels if t["name"] == tunnel_name), None)
                         if tunnel:
-                            hostnames = collect_external_hostnames(host, containers, manual_rules)
-                            if hostnames:
+                            routes = collect_external_routes(host, containers, manual_rules)
+                            if routes:
                                 try:
-                                    update_tunnel_ingress(cf_token, account_id, tunnel["id"], hostnames)
+                                    update_tunnel_ingress(cf_token, account_id, tunnel["id"], routes)
                                 except Exception as e:
                                     logger.warning("Failed to update ingress for %s: %s", host, e)
                                 if zone_id:
-                                    for hostname in hostnames:
+                                    for hostname, _ in routes:
                                         try:
-                                            from app.services.cloudflare_service import ensure_tunnel_dns
                                             ensure_tunnel_dns(cf_token, account_id, zone_id, tunnel["id"], hostname)
                                         except Exception as e:
                                             logger.warning("Failed to update DNS for %s: %s", hostname, e)
@@ -855,3 +872,208 @@ def _ansible_env() -> dict[str, str]:
     env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
     env["ANSIBLE_FORCE_COLOR"] = "1"
     return env
+
+
+# --- Backups scope ---
+
+
+def _write_backups_playbook(
+    workspace_dir: Path,
+    repo_path: str,
+    containers: list[ContainerDefinition],
+    nodes: list[NodeDefinition],
+    vms: list[VMDefinition],
+    secret_store: SecretStore | None = None,
+    filter_hosts: set[str] | None = None,
+) -> None:
+    """Generate a playbook that deploys backup cron jobs on each host.
+
+    For each host with backup-enabled volumes, creates a cron job that runs
+    rsync from each volume to the backup target using hardlink-based snapshots.
+    """
+    from app.services.backup_service import get_all_backup_paths, path_slug
+    from app.services.global_settings import get_global_settings
+
+    gs = get_global_settings(repo_path)
+    backup_target = gs.backup_target
+    schedule = gs.backup_schedule
+
+    if not backup_target or not schedule:
+        # Write a no-op playbook with debug message
+        playbook = (
+            "---\n"
+            "- name: Backups (skipped)\n"
+            "  hosts: localhost\n"
+            "  gather_facts: false\n"
+            "  tasks:\n"
+            "    - name: Skip - no backup target or schedule configured\n"
+            "      debug:\n"
+            "        msg: \"Configure backup_target and backup_schedule in Settings first\"\n"
+        )
+        (workspace_dir / "playbook.yml").write_text(playbook)
+        return
+
+    all_paths = get_all_backup_paths(containers, repo_path, gs.docker_vols_base)
+
+    # Group by host
+    by_host: dict[str, list] = {}
+    for p in all_paths:
+        by_host.setdefault(p.host, []).append(p)
+
+    if filter_hosts:
+        by_host = {h: ps for h, ps in by_host.items() if h in filter_hosts}
+
+    if not by_host:
+        playbook = (
+            "---\n"
+            "- name: Backups (skipped)\n"
+            "  hosts: localhost\n"
+            "  gather_facts: false\n"
+            "  tasks:\n"
+            "    - name: Skip - no backup paths found\n"
+            "      debug:\n"
+            "        msg: \"No volumes marked for backup\"\n"
+        )
+        (workspace_dir / "playbook.yml").write_text(playbook)
+        return
+
+    # Parse cron schedule
+    cron_parts = schedule.strip().split()
+    if len(cron_parts) != 5:
+        cron_minute, cron_hour, cron_dom, cron_month, cron_dow = "*", "*", "*", "*", "*"
+    else:
+        cron_minute, cron_hour, cron_dom, cron_month, cron_dow = cron_parts
+
+    plays: list[str] = []
+
+    for host, host_paths in sorted(by_host.items()):
+        # Build the backup script for this host
+        script_lines = [
+            "#!/bin/bash",
+            "set -euo pipefail",
+            f'BACKUP_TARGET="{backup_target}"',
+            f'HOST="{host}"',
+            'TODAY=$(date +%Y-%m-%d)',
+            'LOG="/var/log/rootstock-backup.log"',
+            'echo "=== Backup started at $(date) ===" >> "$LOG"',
+        ]
+
+        for bp in host_paths:
+            slug = path_slug(bp.path)
+            dest_latest = f"$BACKUP_TARGET/$HOST/{slug}/latest"
+            dest_snapshot = f"$BACKUP_TARGET/$HOST/{slug}/$TODAY"
+            exclude_flags = " ".join(f"--exclude '{e}'" for e in bp.exclusions) if bp.exclusions else ""
+            script_lines += [
+                f'echo "Backing up {bp.path} ..." >> "$LOG"',
+                f'mkdir -p "{dest_latest}"',
+                f'rsync -a --delete {exclude_flags} "{bp.path}/" "{dest_latest}/" >> "$LOG" 2>&1',
+                f'rm -rf "{dest_snapshot}"',
+                f'cp -al "{dest_latest}" "{dest_snapshot}"',
+                f'echo "  -> {slug}/$TODAY done" >> "$LOG"',
+            ]
+
+        script_lines.append('echo "=== Backup finished at $(date) ===" >> "$LOG"')
+        script_content = "\n".join(script_lines)
+
+        # Write script to workspace
+        host_files = workspace_dir / "files" / host
+        host_files.mkdir(parents=True, exist_ok=True)
+        (host_files / "rootstock-backup.sh").write_text(script_content)
+
+        tasks = [
+            "    - name: Deploy backup script\n"
+            "      copy:\n"
+            f"        src: files/{host}/rootstock-backup.sh\n"
+            "        dest: /usr/local/bin/rootstock-backup.sh\n"
+            "        mode: '0755'\n",
+            f"    - name: Configure backup cron job\n"
+            "      cron:\n"
+            "        name: rootstock-backup\n"
+            f"        minute: \"{cron_minute}\"\n"
+            f"        hour: \"{cron_hour}\"\n"
+            f"        day: \"{cron_dom}\"\n"
+            f"        month: \"{cron_month}\"\n"
+            f"        weekday: \"{cron_dow}\"\n"
+            "        job: /usr/local/bin/rootstock-backup.sh\n"
+            "        user: root\n",
+        ]
+
+        play = (
+            f"- name: Deploy backups on {host}\n"
+            f"  hosts: {host}\n"
+            "  become: true\n"
+            "  gather_facts: false\n"
+            "  tasks:\n" +
+            "\n".join(tasks)
+        )
+        plays.append(play)
+
+    # S3 sync play (if configured)
+    s3 = gs.s3_sync
+    if s3.enabled and s3.bucket and s3.sync_host and secret_store:
+        try:
+            from app.services.secret_store import SecretStore
+            access_key = secret_store.get(s3.access_key_secret) if s3.access_key_secret else ""
+            secret_key = secret_store.get(s3.secret_key_secret) if s3.secret_key_secret else ""
+        except Exception:
+            access_key = ""
+            secret_key = ""
+
+        if access_key and secret_key:
+            s3_prefix = s3.prefix.strip("/") + "/" if s3.prefix.strip("/") else ""
+            s3_script = "\n".join([
+                "#!/bin/bash",
+                "set -euo pipefail",
+                f'export AWS_ACCESS_KEY_ID="{access_key}"',
+                f'export AWS_SECRET_ACCESS_KEY="{secret_key}"',
+                f'export AWS_DEFAULT_REGION="{s3.region}"',
+                f'LOG="/var/log/rootstock-s3sync.log"',
+                f'echo "=== S3 sync started at $(date) ===" >> "$LOG"',
+                f'aws s3 sync "{backup_target}/" "s3://{s3.bucket}/{s3_prefix}" --delete >> "$LOG" 2>&1',
+                f'echo "=== S3 sync finished at $(date) ===" >> "$LOG"',
+            ])
+
+            s3_files = workspace_dir / "files" / s3.sync_host
+            s3_files.mkdir(parents=True, exist_ok=True)
+            (s3_files / "rootstock-s3sync.sh").write_text(s3_script)
+
+            s3_schedule = s3.schedule.strip() if s3.schedule.strip() else schedule
+            s3_parts = s3_schedule.split()
+            if len(s3_parts) == 5:
+                s3_min, s3_hour, s3_dom, s3_month, s3_dow = s3_parts
+            else:
+                s3_min, s3_hour, s3_dom, s3_month, s3_dow = cron_minute, cron_hour, cron_dom, cron_month, cron_dow
+
+            s3_play = (
+                f"- name: Deploy S3 sync on {s3.sync_host}\n"
+                f"  hosts: {s3.sync_host}\n"
+                "  become: true\n"
+                "  gather_facts: false\n"
+                "  tasks:\n"
+                "    - name: Ensure awscli is installed\n"
+                "      apt:\n"
+                "        name: awscli\n"
+                "        state: present\n"
+                "      ignore_errors: true\n"
+                "\n"
+                "    - name: Deploy S3 sync script\n"
+                "      copy:\n"
+                f"        src: files/{s3.sync_host}/rootstock-s3sync.sh\n"
+                "        dest: /usr/local/bin/rootstock-s3sync.sh\n"
+                "        mode: '0700'\n"
+                "\n"
+                "    - name: Configure S3 sync cron job\n"
+                "      cron:\n"
+                "        name: rootstock-s3sync\n"
+                f"        minute: \"{s3_min}\"\n"
+                f"        hour: \"{s3_hour}\"\n"
+                f"        day: \"{s3_dom}\"\n"
+                f"        month: \"{s3_month}\"\n"
+                f"        weekday: \"{s3_dow}\"\n"
+                "        job: /usr/local/bin/rootstock-s3sync.sh\n"
+                "        user: root\n"
+            )
+            plays.append(s3_play)
+
+    playbook = "---\n" + "\n".join(plays)
+    (workspace_dir / "playbook.yml").write_text(playbook)

@@ -92,10 +92,26 @@ def generate_compose(
         if ctr.devices:
             svc["devices"] = list(ctr.devices)
 
+        # Depends on
+        if ctr.depends_on:
+            svc["depends_on"] = list(ctr.depends_on)
+
+        # Healthcheck
+        if ctr.healthcheck and ctr.healthcheck.test:
+            svc["healthcheck"] = {
+                "test": ["CMD-SHELL", ctr.healthcheck.test],
+                "interval": ctr.healthcheck.interval,
+                "timeout": ctr.healthcheck.timeout,
+                "retries": ctr.healthcheck.retries,
+            }
+
         # Network
         if ctr.network:
-            svc["networks"] = [ctr.network]
-            networks.add(ctr.network)
+            if ctr.network in ("host", "none"):
+                svc["network_mode"] = ctr.network
+            else:
+                svc["networks"] = [ctr.network]
+                networks.add(ctr.network)
 
         services[ctr.name] = svc
 
@@ -116,7 +132,10 @@ def generate_compose(
             if extra.command:
                 extra_svc["command"] = extra.command
             if ctr.network:
-                extra_svc["networks"] = [ctr.network]
+                if ctr.network in ("host", "none"):
+                    extra_svc["network_mode"] = ctr.network
+                else:
+                    extra_svc["networks"] = [ctr.network]
             services[f"{ctr.name}-{extra_name}"] = extra_svc
 
     if not services:

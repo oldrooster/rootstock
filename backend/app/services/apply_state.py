@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.services import yaml_service
 
-AREAS = ["terraform", "roles", "containers", "dns", "ingress"]
+AREAS = ["terraform", "roles", "containers", "dns", "ingress", "backups"]
 
 
 def _state_path(repo_path: str) -> Path:
@@ -29,6 +29,7 @@ def _area_dirs(repo_path: str) -> dict[str, list[Path]]:
         "containers": [base / "containers", base / "services"],
         "dns": [base / "dns", base / "containers", base / "services"],
         "ingress": [base / "ingress", base / "containers", base / "services"],
+        "backups": [base / "backups", base / "containers", base / "services"],
     }
 
 

@@ -86,6 +86,7 @@ const SECTIONS: SectionDef[] = [
   { key: 'containers', label: 'Ansible: Containers', description: 'Deploy docker-compose, pull and start containers', type: 'ansible' },
   { key: 'dns', label: 'Ansible: DNS', description: 'Update Pi-hole DNS configuration', type: 'ansible' },
   { key: 'ingress', label: 'Ansible: Ingress', description: 'Deploy Caddyfile and Cloudflare tunnel configs', type: 'ansible' },
+  { key: 'backups', label: 'Ansible: Backups', description: 'Deploy backup cron jobs to hosts', type: 'ansible' },
 ]
 
 /* ── ANSI color code → HTML conversion ──────────────────────────────── */
@@ -151,6 +152,12 @@ interface RoleInfo {
   description: string
 }
 
+interface ContainerInfo {
+  name: string
+  enabled: boolean
+  hosts: string[]
+}
+
 export default function Apply() {
   const [preview, setPreview] = useState<ApplyPreview | null>(null)
   const [dirty, setDirty] = useState<DirtyStatus>({ dirty: {}, any_dirty: false })
@@ -168,6 +175,15 @@ export default function Apply() {
   const [availableRoles, setAvailableRoles] = useState<RoleInfo[]>([])
   const [selectedRoles, setSelectedRoles] = useState<Set<string>>(new Set())
   const [rolesExpanded, setRolesExpanded] = useState(false)
+
+  // Containers selection
+  const [availableContainers, setAvailableContainers] = useState<ContainerInfo[]>([])
+  const [selectedContainers, setSelectedContainers] = useState<Set<string>>(new Set())
+  const [containersExpanded, setContainersExpanded] = useState(false)
+
+  // Ingress host selection
+  const [selectedIngressHosts, setSelectedIngressHosts] = useState<Set<string>>(new Set())
+  const [ingressExpanded, setIngressExpanded] = useState(false)
 
   const fetchStatus = () => {
     Promise.all([
@@ -188,12 +204,43 @@ export default function Apply() {
       .catch(() => {})
   }
 
+  const fetchContainers = () => {
+    fetch('/api/containers/')
+      .then(r => r.json())
+      .then((ctrs: ContainerInfo[]) => {
+        const enabled = ctrs.filter(c => c.enabled)
+        setAvailableContainers(enabled)
+        setSelectedContainers(new Set(enabled.map(c => c.name)))
+        // Derive ingress hosts from containers with ingress
+        const hosts = new Set<string>()
+        for (const c of enabled) {
+          if (c.hosts) c.hosts.forEach(h => hosts.add(h))
+        }
+        setSelectedIngressHosts(hosts)
+      })
+      .catch(() => {})
+  }
+
   useEffect(() => {
     fetchStatus()
     fetchRoles()
+    fetchContainers()
     const interval = setInterval(fetchStatus, 30000)
     return () => clearInterval(interval)
   }, [])
+
+  // Derive host -> container names map for ingress display
+  const ingressHostMap = useMemo(() => {
+    const map: Record<string, string[]> = {}
+    for (const c of availableContainers) {
+      for (const h of c.hosts) {
+        if (!map[h]) map[h] = []
+        map[h].push(c.name)
+      }
+    }
+    return map
+  }, [availableContainers])
+  const allIngressHosts = useMemo(() => Object.keys(ingressHostMap).sort(), [ingressHostMap])
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -292,9 +339,24 @@ export default function Apply() {
       {/* Per-section cards */}
       {SECTIONS.map(section => {
         const isRoles = section.key === 'roles'
-        const rolesUrl = isRoles && selectedRoles.size < availableRoles.length
-          ? `/api/apply/ansible/roles?${Array.from(selectedRoles).map(r => `roles=${encodeURIComponent(r)}`).join('&')}`
-          : `/api/apply/ansible/${section.key}`
+        const isContainers = section.key === 'containers'
+        const isIngress = section.key === 'ingress'
+        const hasFilter = isRoles || isContainers || isIngress
+
+        const buildUrl = () => {
+          if (isRoles && selectedRoles.size < availableRoles.length) {
+            return `/api/apply/ansible/roles?${Array.from(selectedRoles).map(r => `roles=${encodeURIComponent(r)}`).join('&')}`
+          }
+          if (isContainers && selectedContainers.size < availableContainers.length) {
+            return `/api/apply/ansible/containers?${Array.from(selectedContainers).map(c => `containers=${encodeURIComponent(c)}`).join('&')}`
+          }
+          if (isIngress && selectedIngressHosts.size < allIngressHosts.length) {
+            return `/api/apply/ansible/ingress?${Array.from(selectedIngressHosts).map(h => `hosts=${encodeURIComponent(h)}`).join('&')}`
+          }
+          return `/api/apply/ansible/${section.key}`
+        }
+
+        const filterEmpty = (isRoles && selectedRoles.size === 0) || (isContainers && selectedContainers.size === 0) || (isIngress && selectedIngressHosts.size === 0)
 
         return (
         <div key={section.key} style={cardStyle}>
@@ -311,6 +373,28 @@ export default function Apply() {
                   onClick={() => setRolesExpanded(!rolesExpanded)}
                 >
                   {rolesExpanded ? '▾' : '▸'} {selectedRoles.size}/{availableRoles.length} roles
+                </button>
+              )}
+              {isContainers && availableContainers.length > 0 && (
+                <button
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', color: '#8890a0',
+                    fontSize: '0.75rem', padding: '0.1rem 0.3rem',
+                  }}
+                  onClick={() => setContainersExpanded(!containersExpanded)}
+                >
+                  {containersExpanded ? '▾' : '▸'} {selectedContainers.size}/{availableContainers.length} containers
+                </button>
+              )}
+              {isIngress && allIngressHosts.length > 0 && (
+                <button
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', color: '#8890a0',
+                    fontSize: '0.75rem', padding: '0.1rem 0.3rem',
+                  }}
+                  onClick={() => setIngressExpanded(!ingressExpanded)}
+                >
+                  {ingressExpanded ? '▾' : '▸'} {selectedIngressHosts.size}/{allIngressHosts.length} hosts
                 </button>
               )}
             </div>
@@ -352,9 +436,9 @@ export default function Apply() {
                 </>
               ) : (
                 <button
-                  style={{ ...btnApply, padding: '0.35rem 0.75rem', fontSize: '0.8rem', opacity: isRoles && selectedRoles.size === 0 ? 0.5 : 1 }}
-                  disabled={running || (isRoles && selectedRoles.size === 0)}
-                  onClick={() => streamAction(isRoles ? rolesUrl : `/api/apply/ansible/${section.key}`, section.key)}
+                  style={{ ...btnApply, padding: '0.35rem 0.75rem', fontSize: '0.8rem', opacity: hasFilter && filterEmpty ? 0.5 : 1 }}
+                  disabled={running || (hasFilter && filterEmpty)}
+                  onClick={() => streamAction(buildUrl(), section.key)}
                 >
                   {running && runningScope === section.key ? 'Running...' : 'Run'}
                 </button>
@@ -397,6 +481,86 @@ export default function Apply() {
                   <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{role.name}</span>
                   {role.description && (
                     <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>{role.description}</span>
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+
+          {/* Expandable container selector */}
+          {isContainers && containersExpanded && availableContainers.length > 0 && (
+            <div style={{ marginTop: '0.75rem', padding: '0.5rem 0.75rem', background: '#0f0f1a', borderRadius: '4px', border: '1px solid #2a2a3e' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                <span style={{ color: '#8890a0', fontSize: '0.75rem' }}>Select containers to deploy:</span>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button
+                    style={{ background: 'none', border: 'none', color: '#7c9ef8', fontSize: '0.75rem', cursor: 'pointer' }}
+                    onClick={() => setSelectedContainers(new Set(availableContainers.map(c => c.name)))}
+                  >All</button>
+                  <button
+                    style={{ background: 'none', border: 'none', color: '#7c9ef8', fontSize: '0.75rem', cursor: 'pointer' }}
+                    onClick={() => setSelectedContainers(new Set())}
+                  >None</button>
+                </div>
+              </div>
+              {availableContainers.map(ctr => (
+                <label key={ctr.name} style={{
+                  display: 'flex', alignItems: 'center', gap: '0.5rem',
+                  padding: '0.25rem 0', cursor: 'pointer',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedContainers.has(ctr.name)}
+                    onChange={e => {
+                      const next = new Set(selectedContainers)
+                      if (e.target.checked) next.add(ctr.name)
+                      else next.delete(ctr.name)
+                      setSelectedContainers(next)
+                    }}
+                  />
+                  <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{ctr.name}</span>
+                  {ctr.hosts.length > 0 && (
+                    <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>{ctr.hosts.join(', ')}</span>
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+
+          {/* Expandable ingress host selector */}
+          {isIngress && ingressExpanded && allIngressHosts.length > 0 && (
+            <div style={{ marginTop: '0.75rem', padding: '0.5rem 0.75rem', background: '#0f0f1a', borderRadius: '4px', border: '1px solid #2a2a3e' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                <span style={{ color: '#8890a0', fontSize: '0.75rem' }}>Select hosts to deploy ingress:</span>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button
+                    style={{ background: 'none', border: 'none', color: '#7c9ef8', fontSize: '0.75rem', cursor: 'pointer' }}
+                    onClick={() => setSelectedIngressHosts(new Set(allIngressHosts))}
+                  >All</button>
+                  <button
+                    style={{ background: 'none', border: 'none', color: '#7c9ef8', fontSize: '0.75rem', cursor: 'pointer' }}
+                    onClick={() => setSelectedIngressHosts(new Set())}
+                  >None</button>
+                </div>
+              </div>
+              {allIngressHosts.map(host => (
+                <label key={host} style={{
+                  display: 'flex', alignItems: 'center', gap: '0.5rem',
+                  padding: '0.25rem 0', cursor: 'pointer',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedIngressHosts.has(host)}
+                    onChange={e => {
+                      const next = new Set(selectedIngressHosts)
+                      if (e.target.checked) next.add(host)
+                      else next.delete(host)
+                      setSelectedIngressHosts(next)
+                    }}
+                  />
+                  <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{host}</span>
+                  {ingressHostMap[host] && (
+                    <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>{ingressHostMap[host].join(', ')}</span>
                   )}
                 </label>
               ))}

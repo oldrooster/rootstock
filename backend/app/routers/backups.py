@@ -210,6 +210,154 @@ async def get_backup_stats(
     return {"updated_at": _stats_cache.updated_at, "stats": [s.model_dump() for s in results]}
 
 
+# --- Cron status per host ---
+
+
+@router.get("/cron-status")
+async def cron_status(store: ContainerStore = Depends(get_store)):
+    """Check if rootstock-backup cron job is installed on each host that has backup paths."""
+    containers = store.list_all()
+    all_paths = get_all_backup_paths(containers, settings.homelab_repo_path)
+
+    hosts_with_backups = sorted(set(p.host for p in all_paths))
+    result: dict[str, dict] = {}
+    loop = asyncio.get_event_loop()
+
+    async def check_host(host: str):
+        try:
+            ip, user, pem = await _resolve_host_ssh(host)
+        except Exception:
+            result[host] = {"installed": False, "schedule": "", "error": "SSH unavailable"}
+            return
+
+        try:
+            exit_code, stdout, _ = await loop.run_in_executor(
+                None, lambda: _ssh_exec(ip, user, pem,
+                                        "sudo crontab -l 2>/dev/null | grep rootstock-backup || true")
+            )
+            line = stdout.strip()
+            if line and "rootstock-backup" in line:
+                # Extract schedule from cron line (first 5 fields)
+                parts = line.split()
+                schedule = " ".join(parts[:5]) if len(parts) >= 5 else ""
+                result[host] = {"installed": True, "schedule": schedule}
+            else:
+                result[host] = {"installed": False, "schedule": ""}
+        except Exception as e:
+            result[host] = {"installed": False, "schedule": "", "error": str(e)}
+
+    await asyncio.gather(*(check_host(h) for h in hosts_with_backups))
+    return result
+
+
+# --- Last backup time per volume ---
+
+
+@router.get("/last-backup")
+async def last_backup_times(store: ContainerStore = Depends(get_store)):
+    """Get last backup timestamp for each volume on each host."""
+    gs = get_global_settings(settings.homelab_repo_path)
+    backup_target = gs.backup_target
+    if not backup_target:
+        return {}
+
+    containers = store.list_all()
+    all_paths = get_all_backup_paths(containers, settings.homelab_repo_path)
+
+    by_host: dict[str, list] = {}
+    for p in all_paths:
+        by_host.setdefault(p.host, []).append(p)
+
+    result: dict[str, str] = {}  # "host:path" -> last backup date
+    loop = asyncio.get_event_loop()
+
+    async def check_host(host: str, host_paths: list):
+        try:
+            ip, user, pem = await _resolve_host_ssh(host)
+        except Exception:
+            return
+
+        # Build command to find latest snapshot date for each slug
+        cmds = []
+        slug_map = {}
+        for bp in host_paths:
+            slug = path_slug(bp.path)
+            slug_map[slug] = bp.path
+            slug_dir = f"{backup_target}/{host}/{slug}"
+            cmds.append(
+                f'latest=$(sudo ls -1d {slug_dir}/2* 2>/dev/null | sort -r | head -1); '
+                f'if [ -n "$latest" ]; then echo "{slug}=$(basename $latest)"; '
+                f'else echo "{slug}=never"; fi'
+            )
+
+        if not cmds:
+            return
+
+        try:
+            exit_code, stdout, _ = await loop.run_in_executor(
+                None, lambda: _ssh_exec(ip, user, pem, " && ".join(cmds), timeout=30)
+            )
+            if exit_code == 0 and stdout.strip():
+                for line in stdout.strip().split("\n"):
+                    if "=" in line:
+                        slug, date = line.strip().split("=", 1)
+                        path = slug_map.get(slug)
+                        if path:
+                            result[f"{host}:{path}"] = date
+        except Exception:
+            pass
+
+    await asyncio.gather(*(check_host(h, ps) for h, ps in by_host.items()))
+    return result
+
+
+# --- Purge backup sets ---
+
+
+class PurgeRequest(BaseModel):
+    items: list[dict]  # [{"host": "x", "path": "/y", "dates": ["2026-03-01"]}]
+
+
+@router.post("/purge")
+async def purge_backups(body: PurgeRequest):
+    """Purge specific backup snapshots by host, path, and dates."""
+    gs = get_global_settings(settings.homelab_repo_path)
+    backup_target = gs.backup_target
+    if not backup_target:
+        raise HTTPException(400, "Backup target not configured")
+
+    loop = asyncio.get_event_loop()
+    results: list[dict] = []
+
+    for item in body.items:
+        host = item["host"]
+        slug = item["path"]  # frontend sends the slug directly from snapshots
+        dates = item.get("dates", [])
+
+        try:
+            ip, user, pem = await _resolve_host_ssh(host)
+        except Exception as e:
+            results.append({"host": host, "slug": slug, "error": f"SSH failed: {e}"})
+            continue
+
+        for date in dates:
+            snapshot_dir = f"{backup_target}/{host}/{slug}/{date}"
+            try:
+                exit_code, _, stderr = await loop.run_in_executor(
+                    None, lambda d=snapshot_dir: _ssh_exec(ip, user, pem,
+                                                           f"sudo rm -rf {d}", timeout=120)
+                )
+                if exit_code != 0:
+                    results.append({"host": host, "slug": slug, "date": date,
+                                    "error": f"rm failed: {stderr.strip()}"})
+                else:
+                    results.append({"host": host, "slug": slug, "date": date, "ok": True})
+            except Exception as e:
+                results.append({"host": host, "slug": slug, "date": date, "error": str(e)})
+
+    return {"results": results}
+
+
 # --- Snapshots (list available backup dates for a host) ---
 
 

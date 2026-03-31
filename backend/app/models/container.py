@@ -6,6 +6,13 @@ class PortMapping(BaseModel):
     container: int
 
 
+class HealthCheck(BaseModel):
+    test: str = ""            # e.g. "curl -f http://localhost:8080/health"
+    interval: str = "30s"
+    timeout: str = "10s"
+    retries: int = 3
+
+
 class VolumeMount(BaseModel):
     host_path: str
     container_path: str
@@ -43,6 +50,8 @@ class ContainerDefinition(BaseModel):
     build_dockerfile: str = "Dockerfile"
     build_context: str = "."
     build_target: str = ""
+    depends_on: list[str] = []
+    healthcheck: HealthCheck | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -105,6 +114,8 @@ class ContainerCreate(BaseModel):
     build_dockerfile: str = "Dockerfile"
     build_context: str = "."
     build_target: str = ""
+    depends_on: list[str] = []
+    healthcheck: HealthCheck | None = None
 
 
 class ContainerUpdate(BaseModel):
@@ -127,3 +138,5 @@ class ContainerUpdate(BaseModel):
     build_dockerfile: str | None = None
     build_context: str | None = None
     build_target: str | None = None
+    depends_on: list[str] | None = None
+    healthcheck: HealthCheck | None = None

@@ -9,7 +9,8 @@
       "Bash(pip3 list:*)",
       "Bash(grep -r \"export\" /home/guybrush/rootstock/backend/app/routers/*.py)",
       "Bash(done)",
-      "Bash(wc -l /home/guybrush/rootstock/backend/app/services/*.py)"
+      "Bash(wc -l /home/guybrush/rootstock/backend/app/services/*.py)",
+      "Bash(uv run:*)"
     ]
   }
 }

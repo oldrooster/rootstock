@@ -112,15 +112,15 @@ async def all_container_status(
             ip, user, pem = await _resolve_host_ssh(host)
         except Exception:
             for n in names:
-                result.setdefault(n, {})[host] = "unknown"
+                result.setdefault(n, {})[host] = "unknown|none"
             return
 
-        # Single SSH command: check all containers at once
+        # Single SSH command: check all containers at once (status + health)
         inspect_args = " ".join(names)
         cmd = (
             f"for c in {inspect_args}; do "
-            f"status=$(sudo docker inspect -f '{{{{.State.Status}}}}' \"$c\" 2>/dev/null) && "
-            f"echo \"$c=$status\" || echo \"$c=not found\"; done"
+            f"info=$(sudo docker inspect -f '{{{{.State.Status}}}}|{{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none{{{{end}}}}' \"$c\" 2>/dev/null) && "
+            f"echo \"$c=$info\" || echo \"$c=not found|none\"; done"
         )
         try:
             loop = asyncio.get_event_loop()
@@ -129,11 +129,14 @@ async def all_container_status(
             )
             for line in stdout.strip().splitlines():
                 if "=" in line:
-                    cname, status = line.split("=", 1)
-                    result.setdefault(cname, {})[host] = status
+                    cname, info = line.split("=", 1)
+                    parts = info.split("|", 1)
+                    status = parts[0]
+                    health = parts[1] if len(parts) > 1 else "none"
+                    result.setdefault(cname, {})[host] = f"{status}|{health}"
         except Exception:
             for n in names:
-                result.setdefault(n, {})[host] = "error"
+                result.setdefault(n, {})[host] = "error|none"
 
     await asyncio.gather(*(
         check_host(h, names) for h, names in host_containers.items()
@@ -301,7 +304,7 @@ async def update_container(
 ) -> ContainerDefinition:
     existing = store.get(name)
     updated_data = existing.model_dump()
-    patch_data = body.model_dump(exclude_none=True)
+    patch_data = body.model_dump(exclude_unset=True)
     updated_data.update(patch_data)
     updated = ContainerDefinition(**updated_data)
     store.write(updated)

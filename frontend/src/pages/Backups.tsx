@@ -75,6 +75,23 @@ interface BackupSettings {
   backup_schedule: string
 }
 
+interface CronStatusInfo {
+  installed: boolean
+  schedule: string
+  error?: string
+}
+
+interface S3SyncConfig {
+  enabled: boolean
+  bucket: string
+  region: string
+  access_key_secret: string
+  secret_key_secret: string
+  sync_host: string
+  schedule: string
+  prefix: string
+}
+
 interface SnapshotInfo {
   slug: string
   dates: string[]
@@ -218,6 +235,32 @@ export default function Backups() {
   const [importResult, setImportResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const importFileRef = useRef<HTMLInputElement>(null)
 
+  // Last backup times: "host:path" -> date string
+  const [lastBackups, setLastBackups] = useState<Record<string, string>>({})
+  const [lastBackupsLoading, setLastBackupsLoading] = useState(false)
+
+  // Cron status per host
+  const [cronStatus, setCronStatus] = useState<Record<string, CronStatusInfo>>({})
+  const [cronLoading, setCronLoading] = useState(false)
+
+  // Purge
+  const [showPurge, setShowPurge] = useState(false)
+  const [purgeHost, setPurgeHost] = useState('')
+  const [purgeSnapshots, setPurgeSnapshots] = useState<{ slug: string; dates: string[] }[]>([])
+  const [purgeSelection, setPurgeSelection] = useState<Set<string>>(new Set()) // "slug:date"
+  const [purgeRunning, setPurgeRunning] = useState(false)
+  const [purgeResult, setPurgeResult] = useState<string | null>(null)
+  const [purgeConfirm, setPurgeConfirm] = useState(false)
+
+  // S3 config
+  const [s3Config, setS3Config] = useState<S3SyncConfig>({
+    enabled: false, bucket: '', region: 'us-east-1',
+    access_key_secret: '', secret_key_secret: '',
+    sync_host: '', schedule: '', prefix: '',
+  })
+  const [s3Dirty, setS3Dirty] = useState(false)
+  const [s3Saving, setS3Saving] = useState(false)
+
   const fetchStats = useCallback((refresh = false) => {
     setStatsLoading(true)
     fetch(`/api/backups/stats${refresh ? '?refresh=true' : ''}`)
@@ -280,6 +323,24 @@ export default function Backups() {
     reader.readAsText(file)
   }, [])
 
+  const fetchLastBackups = useCallback(() => {
+    setLastBackupsLoading(true)
+    fetch('/api/backups/last-backup')
+      .then(r => r.json())
+      .then(setLastBackups)
+      .catch(() => {})
+      .finally(() => setLastBackupsLoading(false))
+  }, [])
+
+  const fetchCronStatus = useCallback(() => {
+    setCronLoading(true)
+    fetch('/api/backups/cron-status')
+      .then(r => r.json())
+      .then(setCronStatus)
+      .catch(() => {})
+      .finally(() => setCronLoading(false))
+  }, [])
+
   const fetchAll = () => {
     setLoading(true)
     Promise.all([
@@ -296,12 +357,15 @@ export default function Backups() {
           backup_target: s.global_settings?.backup_target || '',
           backup_schedule: s.global_settings?.backup_schedule || '',
         })
+        if (s.global_settings?.s3_sync) {
+          setS3Config(prev => ({ ...prev, ...s.global_settings.s3_sync }))
+        }
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }
 
-  useEffect(() => { fetchAll(); fetchStats() }, [])
+  useEffect(() => { fetchAll(); fetchStats(); fetchLastBackups(); fetchCronStatus() }, [])
 
   // Group paths by host
   const pathsByHost: Record<string, BackupPath[]> = {}
@@ -512,6 +576,99 @@ export default function Backups() {
     setRestoreRunning(false)
   }
 
+  /* ── Purge ──────────────────────────────────────────────── */
+
+  function openPurgeDialog() {
+    setPurgeHost('')
+    setPurgeSnapshots([])
+    setPurgeSelection(new Set())
+    setPurgeRunning(false)
+    setPurgeResult(null)
+    setPurgeConfirm(false)
+    setShowPurge(true)
+  }
+
+  function loadPurgeSnapshots(host: string) {
+    setPurgeHost(host)
+    setPurgeSnapshots([])
+    setPurgeSelection(new Set())
+    setPurgeResult(null)
+    setPurgeConfirm(false)
+    if (!host) return
+    fetch(`/api/backups/snapshots/${host}`)
+      .then(r => r.json())
+      .then(setPurgeSnapshots)
+      .catch(() => {})
+  }
+
+  function togglePurgeItem(key: string) {
+    setPurgeSelection(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+    setPurgeConfirm(false)
+  }
+
+  function executePurge() {
+    if (!purgeConfirm) { setPurgeConfirm(true); return }
+    setPurgeRunning(true)
+    setPurgeResult(null)
+
+    // Build items: group by slug -> dates
+    const bySlug: Record<string, string[]> = {}
+    for (const key of purgeSelection) {
+      const [slug, date] = key.split(':', 2)
+      if (!bySlug[slug]) bySlug[slug] = []
+      bySlug[slug].push(date)
+    }
+    // Convert slugs back to paths (best effort from snapshot data)
+    const items = Object.entries(bySlug).map(([slug, dates]) => ({
+      host: purgeHost,
+      path: slug, // path_slug is used on backend to resolve
+      dates,
+    }))
+
+    fetch('/api/backups/purge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        const ok = data.results?.filter((r: { ok?: boolean }) => r.ok).length || 0
+        const err = data.results?.filter((r: { error?: string }) => r.error).length || 0
+        setPurgeResult(`Purged ${ok} snapshot(s)${err > 0 ? `, ${err} error(s)` : ''}`)
+        fetchStats(true)
+        fetchLastBackups()
+        loadPurgeSnapshots(purgeHost)
+      })
+      .catch(e => setPurgeResult(`Error: ${e.message}`))
+      .finally(() => { setPurgeRunning(false); setPurgeConfirm(false) })
+  }
+
+  /* ── S3 Config ─────────────────────────────────────────── */
+
+  function saveS3Config() {
+    setS3Saving(true)
+    // Load current global settings, update s3_sync, save
+    fetch('/api/settings/')
+      .then(r => r.json())
+      .then(data => {
+        const gs = data.global_settings || {}
+        gs.s3_sync = s3Config
+        return fetch('/api/settings/global', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(gs),
+        })
+      })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then(() => { setS3Dirty(false) })
+      .catch(e => setError(e.message))
+      .finally(() => setS3Saving(false))
+  }
+
   /* ── Render ─────────────────────────────────────────────── */
 
   if (error) return <p style={{ color: '#f87171' }}>Error: {error}</p>
@@ -534,6 +691,7 @@ export default function Backups() {
           <div style={{ width: '1px', height: '1.5rem', background: '#2a2a3e' }} />
           <button style={btnSuccess} onClick={openBackupDialog} disabled={paths.length === 0}>Backup Now</button>
           <button style={btnAmber} onClick={openRestoreDialog}>Restore</button>
+          <button style={btnDanger} onClick={openPurgeDialog} disabled={paths.length === 0}>Purge</button>
         </div>
       </div>
 
@@ -593,6 +751,16 @@ export default function Backups() {
             {hostTotal > 0 && (
               <div style={{ color: '#6b7280', fontSize: '0.7rem', marginTop: '0.25rem' }}>{formatBytes(hostTotal)}</div>
             )}
+            {cronStatus[host] && (
+              <div style={{
+                marginTop: '0.35rem', fontSize: '0.65rem', padding: '0.15rem 0.4rem',
+                borderRadius: '9999px', display: 'inline-block',
+                background: cronStatus[host].installed ? '#166534' : '#7f1d1d',
+                color: cronStatus[host].installed ? '#86efac' : '#fca5a5',
+              }}>
+                {cronStatus[host].installed ? 'cron active' : 'no cron'}
+              </div>
+            )}
           </div>
           )
         })}
@@ -614,6 +782,7 @@ export default function Backups() {
                 <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Source</th>
                 <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Description</th>
                 <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Exclusions</th>
+                <th style={{ textAlign: 'right', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Last Backup</th>
                 <th style={{ textAlign: 'right', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Size</th>
                 <th style={{ textAlign: 'right', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Sets</th>
               </tr>
@@ -621,6 +790,7 @@ export default function Backups() {
             <tbody>
               {hostPaths.map((p, i) => {
                 const stat = getStatForPath(p.host, p.path)
+                const lastDate = lastBackups[`${p.host}:${p.path}`]
                 return (
                 <tr key={`${p.path}-${i}`} style={{ borderBottom: '1px solid #1a1a2e' }}>
                   <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontFamily: 'monospace' }}>{p.path}</td>
@@ -642,6 +812,9 @@ export default function Backups() {
                           }}>{e}</span>
                         ))
                       : '\u2014'}
+                  </td>
+                  <td style={{ color: lastDate && lastDate !== 'never' ? '#e0e0e0' : '#6b7280', padding: '0.4rem 0.75rem', fontSize: '0.85rem', textAlign: 'right' }}>
+                    {lastBackupsLoading ? '...' : (lastDate && lastDate !== 'never' ? lastDate : '\u2014')}
                   </td>
                   <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', textAlign: 'right', fontFamily: 'monospace' }}>
                     {stat ? formatBytes(stat.size_bytes) : '\u2014'}
@@ -934,6 +1107,179 @@ export default function Backups() {
           </div>
         </div>
       )}
+
+      {/* ── Purge Dialog ──────────────────────────────────── */}
+      {showPurge && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000,
+        }} onClick={(e) => { if (e.target === e.currentTarget && !purgeRunning) setShowPurge(false) }}>
+          <div style={{ background: '#1a1a2e', borderRadius: '8px', padding: '1.5rem', width: '600px', maxHeight: '80vh', overflowY: 'auto' }}>
+            <h2 style={{ color: '#e0e0e0', margin: '0 0 1rem 0', fontSize: '1.1rem' }}>Purge Backup Sets</h2>
+
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={labelStyle}>Host</label>
+              <select style={selectStyle} value={purgeHost}
+                onChange={e => loadPurgeSnapshots(e.target.value)}>
+                <option value="">Select host...</option>
+                {hostNames.map(h => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+
+            {purgeHost && purgeSnapshots.length === 0 && (
+              <p style={{ color: '#8890a0', fontSize: '0.85rem' }}>No snapshots found for {purgeHost}</p>
+            )}
+
+            {purgeSnapshots.length > 0 && (
+              <>
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                    onClick={() => {
+                      const all = new Set<string>()
+                      purgeSnapshots.forEach(s => s.dates.forEach(d => all.add(`${s.slug}:${d}`)))
+                      setPurgeSelection(all)
+                    }}>All</button>
+                  <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                    onClick={() => setPurgeSelection(new Set())}>None</button>
+                  <span style={{ color: '#8890a0', fontSize: '0.8rem', alignSelf: 'center', marginLeft: 'auto' }}>
+                    {purgeSelection.size} selected
+                  </span>
+                </div>
+
+                <div style={{ maxHeight: '300px', overflowY: 'auto', marginBottom: '1rem' }}>
+                  {purgeSnapshots.map(snap => (
+                    <div key={snap.slug} style={{ marginBottom: '0.75rem' }}>
+                      <div style={{ color: '#7c9ef8', fontSize: '0.8rem', fontWeight: 600, fontFamily: 'monospace', marginBottom: '0.25rem' }}>
+                        {snap.slug}
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
+                        {snap.dates.map(date => {
+                          const key = `${snap.slug}:${date}`
+                          return (
+                            <label key={date} style={{
+                              display: 'flex', alignItems: 'center', gap: '0.3rem',
+                              fontSize: '0.8rem', color: '#e0e0e0', padding: '0.2rem 0.5rem',
+                              background: purgeSelection.has(key) ? 'rgba(248,113,113,0.15)' : '#0f0f1a',
+                              border: '1px solid #2a2a3e', borderRadius: '4px', cursor: 'pointer',
+                            }}>
+                              <input type="checkbox" checked={purgeSelection.has(key)}
+                                onChange={() => togglePurgeItem(key)} />
+                              {date}
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {purgeResult && (
+              <div style={{
+                padding: '0.5rem 0.75rem', borderRadius: '4px', marginBottom: '0.75rem',
+                background: purgeResult.startsWith('Error') ? 'rgba(248,113,113,0.1)' : 'rgba(34,197,94,0.1)',
+                color: purgeResult.startsWith('Error') ? '#fca5a5' : '#86efac',
+                fontSize: '0.85rem',
+              }}>{purgeResult}</div>
+            )}
+
+            {purgeConfirm && !purgeRunning && (
+              <div style={{
+                background: 'rgba(248, 113, 113, 0.1)', border: '1px solid rgba(248, 113, 113, 0.3)',
+                borderRadius: '4px', padding: '0.75rem', marginBottom: '1rem',
+              }}>
+                <p style={{ color: '#fca5a5', fontSize: '0.85rem', margin: 0 }}>
+                  This will permanently delete {purgeSelection.size} backup snapshot(s) from {purgeHost}.
+                  This action cannot be undone. Click "Confirm Purge" to proceed.
+                </p>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+              <button style={btnSecondary} onClick={() => setShowPurge(false)} disabled={purgeRunning}>Cancel</button>
+              {purgeSelection.size > 0 && (
+                <button style={btnDanger} onClick={executePurge} disabled={purgeRunning}>
+                  {purgeRunning ? 'Purging...' : purgeConfirm ? 'Confirm Purge' : `Purge (${purgeSelection.size})`}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── S3 Sync Configuration ────────────────────────── */}
+      <div style={cardStyle}>
+        <h2 style={{ color: '#e0e0e0', fontSize: '1rem', margin: '0 0 0.75rem 0' }}>S3 Sync</h2>
+        <p style={{ color: '#8890a0', fontSize: '0.8rem', margin: '0 0 0.75rem 0' }}>
+          Sync backup sets to an AWS S3 bucket. Deployed via Ansible: Backups.
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+          <div>
+            <label style={labelStyle}>S3 Bucket</label>
+            <input style={inputStyle} value={s3Config.bucket}
+              onChange={e => { setS3Config({ ...s3Config, bucket: e.target.value }); setS3Dirty(true) }}
+              placeholder="my-homelab-backups" />
+          </div>
+          <div>
+            <label style={labelStyle}>Region</label>
+            <input style={inputStyle} value={s3Config.region}
+              onChange={e => { setS3Config({ ...s3Config, region: e.target.value }); setS3Dirty(true) }}
+              placeholder="us-east-1" />
+          </div>
+          <div>
+            <label style={labelStyle}>Access Key (secret path)</label>
+            <input style={inputStyle} value={s3Config.access_key_secret}
+              onChange={e => { setS3Config({ ...s3Config, access_key_secret: e.target.value }); setS3Dirty(true) }}
+              placeholder="aws/access_key" />
+          </div>
+          <div>
+            <label style={labelStyle}>Secret Key (secret path)</label>
+            <input style={inputStyle} value={s3Config.secret_key_secret}
+              onChange={e => { setS3Config({ ...s3Config, secret_key_secret: e.target.value }); setS3Dirty(true) }}
+              placeholder="aws/secret_key" />
+          </div>
+          <div>
+            <label style={labelStyle}>Sync From Host</label>
+            <select style={selectStyle} value={s3Config.sync_host}
+              onChange={e => { setS3Config({ ...s3Config, sync_host: e.target.value }); setS3Dirty(true) }}>
+              <option value="">Select host...</option>
+              {hostNames.map(h => <option key={h} value={h}>{h}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={labelStyle}>S3 Key Prefix</label>
+            <input style={inputStyle} value={s3Config.prefix}
+              onChange={e => { setS3Config({ ...s3Config, prefix: e.target.value }); setS3Dirty(true) }}
+              placeholder="backups/" />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={labelStyle}>Sync Schedule (cron, leave empty to use backup schedule)</label>
+            <input style={inputStyle} value={s3Config.schedule}
+              onChange={e => { setS3Config({ ...s3Config, schedule: e.target.value }); setS3Dirty(true) }}
+              placeholder="0 4 * * *" />
+            {s3Config.schedule && (
+              <p style={{ color: '#8890a0', fontSize: '0.75rem', margin: '0.25rem 0 0 0' }}>
+                {describeCron(s3Config.schedule)}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <label style={{ color: '#8890a0', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <input type="checkbox" checked={s3Config.enabled}
+              onChange={e => { setS3Config({ ...s3Config, enabled: e.target.checked }); setS3Dirty(true) }} />
+            Enabled
+          </label>
+          <div style={{ marginLeft: 'auto' }}>
+            <button style={btnPrimary} onClick={saveS3Config} disabled={!s3Dirty || s3Saving}>
+              {s3Saving ? 'Saving...' : 'Save S3 Config'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

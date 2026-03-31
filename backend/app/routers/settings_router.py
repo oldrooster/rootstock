@@ -80,10 +80,12 @@ async def get_all_settings() -> AllSettings:
 
 @router.put("/global")
 async def update_global_settings(body: GlobalSettings) -> GlobalSettings:
-    # Preserve role_order if not provided (frontend Settings page doesn't manage it)
+    # Preserve fields not managed by the Settings page
+    existing = get_global_settings(settings.homelab_repo_path)
     if not body.role_order:
-        existing = get_global_settings(settings.homelab_repo_path)
         body.role_order = existing.role_order
+    if not body.s3_sync.bucket:
+        body.s3_sync = existing.s3_sync
     save_global_settings(settings.homelab_repo_path, body)
     return body
 

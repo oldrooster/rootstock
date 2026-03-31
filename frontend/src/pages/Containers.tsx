@@ -6,6 +6,13 @@ import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 interface PortMapping { host: number; container: number }
 interface VolumeMount { host_path: string; container_path: string; backup: boolean; backup_exclusions: string[] }
 
+interface HealthCheck {
+  test: string
+  interval: string
+  timeout: string
+  retries: number
+}
+
 interface Container {
   name: string
   enabled: boolean
@@ -27,6 +34,8 @@ interface Container {
   build_dockerfile: string
   build_context: string
   build_target: string
+  depends_on: string[]
+  healthcheck: HealthCheck | null
 }
 
 interface HostOption {
@@ -125,6 +134,11 @@ interface FormData {
   build_dockerfile: string
   build_context: string
   build_target: string
+  depends_on: string[]
+  healthcheck_test: string
+  healthcheck_interval: string
+  healthcheck_timeout: string
+  healthcheck_retries: string
 }
 
 const emptyForm: FormData = {
@@ -136,6 +150,8 @@ const emptyForm: FormData = {
   devices_text: '',
   compose_extras_text: '',
   build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.', build_target: '',
+  depends_on: [],
+  healthcheck_test: '', healthcheck_interval: '30s', healthcheck_timeout: '10s', healthcheck_retries: '3',
 }
 
 function containerToForm(c: Container): FormData {
@@ -166,6 +182,11 @@ function containerToForm(c: Container): FormData {
     build_dockerfile: c.build_dockerfile || 'Dockerfile',
     build_context: c.build_context || '.',
     build_target: c.build_target || '',
+    depends_on: c.depends_on || [],
+    healthcheck_test: c.healthcheck?.test || '',
+    healthcheck_interval: c.healthcheck?.interval || '30s',
+    healthcheck_timeout: c.healthcheck?.timeout || '10s',
+    healthcheck_retries: c.healthcheck ? String(c.healthcheck.retries) : '3',
   }
 }
 
@@ -182,7 +203,7 @@ function formToPayload(f: FormData) {
     external: f.external,
   }
 
-  if (f.network) payload.network = f.network
+  payload.network = f.network || null
 
   if (f.ports_text.trim()) {
     payload.ports = f.ports_text.trim().split('\n').filter(Boolean).map(line => {
@@ -227,6 +248,18 @@ function formToPayload(f: FormData) {
   payload.build_dockerfile = f.build_dockerfile
   payload.build_context = f.build_context
   payload.build_target = f.build_target
+  payload.depends_on = f.depends_on
+
+  if (f.healthcheck_test.trim()) {
+    payload.healthcheck = {
+      test: f.healthcheck_test.trim(),
+      interval: f.healthcheck_interval || '30s',
+      timeout: f.healthcheck_timeout || '10s',
+      retries: Number(f.healthcheck_retries) || 3,
+    }
+  } else {
+    payload.healthcheck = null
+  }
 
   return payload
 }
@@ -502,7 +535,7 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
   cursor: 'pointer',
 })
 
-function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, hostOptions }: {
+function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel, disableName, hostOptions, allContainerNames }: {
   form: FormData
   setForm: (f: FormData) => void
   onSubmit: () => void
@@ -510,10 +543,20 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
   submitLabel: string
   disableName?: boolean
   hostOptions: HostOption[]
+  allContainerNames: string[]
 }) {
+  // Normalize form to ensure new fields have defaults (handles stale state)
+  const form: FormData = {
+    ...rawForm,
+    depends_on: rawForm.depends_on || [],
+    healthcheck_test: rawForm.healthcheck_test || '',
+    healthcheck_interval: rawForm.healthcheck_interval || '30s',
+    healthcheck_timeout: rawForm.healthcheck_timeout || '10s',
+    healthcheck_retries: rawForm.healthcheck_retries || '3',
+  }
   const [imageMode, setImageMode] = useState<'image' | 'build'>(form.build_repo ? 'build' : 'image')
   const [showAdvanced, setShowAdvanced] = useState(
-    !!(form.env_text || form.devices_text || form.compose_extras_text)
+    !!(form.env_text || form.devices_text || form.compose_extras_text || form.depends_on.length || form.healthcheck_test)
   )
   const [showExtras, setShowExtras] = useState(!!form.compose_extras_text)
   const [showImport, setShowImport] = useState(false)
@@ -783,6 +826,63 @@ function ContainerForm({ form, setForm, onSubmit, onCancel, submitLabel, disable
               <textarea style={{ ...inputStyle, minHeight: '3rem', resize: 'vertical', fontFamily: 'monospace' }} value={form.compose_extras_text}
                 onChange={e => set('compose_extras_text', e.target.value)}
                 placeholder='{"mongo": {"image": "mongo:7.0", "volumes": ["${DOCKER_VOLS}/unifi/db:/data/db"]}}' />
+            )}
+          </div>
+
+          {/* Depends On */}
+          <div style={{ marginTop: ROW_GAP }}>
+            <label style={labelStyle}>Depends On</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+              {allContainerNames.filter(n => n !== form.name).map(name => (
+                <label key={name} style={{
+                  display: 'flex', alignItems: 'center', gap: '0.3rem',
+                  fontSize: '0.8rem', color: '#e0e0e0', padding: '0.2rem 0.5rem',
+                  background: (form.depends_on || []).includes(name) ? 'rgba(124,158,248,0.15)' : '#0f0f1a',
+                  border: '1px solid #2a2a3e', borderRadius: '4px', cursor: 'pointer',
+                }}>
+                  <input type="checkbox" checked={(form.depends_on || []).includes(name)}
+                    onChange={e => {
+                      const deps = form.depends_on || []
+                      const next = e.target.checked
+                        ? [...deps, name]
+                        : deps.filter(n => n !== name)
+                      setForm({ ...form, depends_on: next })
+                    }} />
+                  {name}
+                </label>
+              ))}
+              {allContainerNames.filter(n => n !== form.name).length === 0 && (
+                <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>No other containers</span>
+              )}
+            </div>
+          </div>
+
+          {/* Health Check */}
+          <div style={{ marginTop: ROW_GAP }}>
+            <label style={labelStyle}>Health Check</label>
+            <div style={{ marginBottom: '0.35rem' }}>
+              <input style={inputStyle} value={form.healthcheck_test}
+                onChange={e => set('healthcheck_test', e.target.value)}
+                placeholder="e.g. curl -f http://localhost:8080/health || exit 1" />
+            </div>
+            {form.healthcheck_test && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: GAP }}>
+                <div>
+                  <label style={labelStyle}>Interval</label>
+                  <input style={inputStyle} value={form.healthcheck_interval}
+                    onChange={e => set('healthcheck_interval', e.target.value)} placeholder="30s" />
+                </div>
+                <div>
+                  <label style={labelStyle}>Timeout</label>
+                  <input style={inputStyle} value={form.healthcheck_timeout}
+                    onChange={e => set('healthcheck_timeout', e.target.value)} placeholder="10s" />
+                </div>
+                <div>
+                  <label style={labelStyle}>Retries</label>
+                  <input style={inputStyle} value={form.healthcheck_retries}
+                    onChange={e => set('healthcheck_retries', e.target.value)} placeholder="3" />
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -1216,6 +1316,7 @@ export default function Containers() {
           onCancel={() => setShowAdd(false)}
           submitLabel="Create"
           hostOptions={hostOptions}
+          allContainerNames={containers.map(c => c.name)}
         />
       )}
 
@@ -1295,6 +1396,7 @@ export default function Containers() {
               submitLabel="Save"
               disableName
               hostOptions={hostOptions}
+              allContainerNames={containers.map(c => c.name)}
             />
           ) : (
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -1309,17 +1411,38 @@ export default function Containers() {
                     if (!ctr.enabled) {
                       label = 'disabled'; bg = '#7f1d1d'; fg = '#fca5a5'
                     } else if (hostStatuses) {
-                      const vals = Object.values(hostStatuses)
-                      if (vals.every(v => v === 'running')) {
+                      const raw = Object.values(hostStatuses)
+                      const parsed = raw.map(v => {
+                        const [s, h] = v.split('|', 2)
+                        return { status: s, health: h || 'none' }
+                      })
+                      const allRunning = parsed.every(p => p.status === 'running')
+                      const someRunning = parsed.some(p => p.status === 'running')
+                      const hasHealth = parsed.some(p => p.health !== 'none')
+
+                      if (allRunning && hasHealth) {
+                        const allHealthy = parsed.every(p => p.health === 'healthy' || p.health === 'none')
+                        const someUnhealthy = parsed.some(p => p.health === 'unhealthy')
+                        const someStarting = parsed.some(p => p.health === 'starting')
+                        if (allHealthy) {
+                          label = 'healthy'; bg = '#166534'; fg = '#86efac'
+                        } else if (someUnhealthy) {
+                          label = 'unhealthy'; bg = '#7f1d1d'; fg = '#fca5a5'
+                        } else if (someStarting) {
+                          label = 'starting'; bg = '#78350f'; fg = '#fde68a'
+                        } else {
+                          label = 'running'; bg = '#166534'; fg = '#86efac'
+                        }
+                      } else if (allRunning) {
                         label = 'running'; bg = '#166534'; fg = '#86efac'
-                      } else if (vals.some(v => v === 'running')) {
+                      } else if (someRunning) {
                         label = 'partial'; bg = '#78350f'; fg = '#fde68a'
-                      } else if (vals.every(v => v === 'exited' || v === 'created')) {
+                      } else if (parsed.every(p => p.status === 'exited' || p.status === 'created')) {
                         label = 'stopped'; bg = '#7f1d1d'; fg = '#fca5a5'
-                      } else if (vals.every(v => v === 'not found')) {
+                      } else if (parsed.every(p => p.status === 'not found')) {
                         label = 'not provisioned'; bg = '#1a1a2e'; fg = '#8890a0'
                       } else {
-                        label = vals[0]; bg = '#1a1a2e'; fg = '#8890a0'
+                        label = parsed[0].status; bg = '#1a1a2e'; fg = '#8890a0'
                       }
                     } else if (statusLoading) {
                       label = '...'; bg = '#1a1a2e'; fg = '#6b7280'

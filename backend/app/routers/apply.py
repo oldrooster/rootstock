@@ -198,6 +198,8 @@ async def terraform_destroy(
 async def ansible_run(
     scope: str,
     roles: list[str] = Query(default=None),
+    containers_filter: list[str] = Query(default=None, alias="containers"),
+    hosts_filter: list[str] = Query(default=None, alias="hosts"),
     vm_store: VMStore = Depends(get_vm_store),
     node_store: NodeStore = Depends(get_node_store),
     container_store: ContainerStore = Depends(get_container_store),
@@ -205,7 +207,7 @@ async def ansible_run(
     secret_store: SecretStore = Depends(get_secret_store),
 ) -> StreamingResponse:
     """Run Ansible for a specific scope: roles, containers, dns, ingress."""
-    valid_scopes = {"roles", "containers", "dns", "ingress"}
+    valid_scopes = {"roles", "containers", "dns", "ingress", "backups"}
     if scope not in valid_scopes:
         from fastapi import HTTPException
         raise HTTPException(400, f"Invalid scope '{scope}'. Valid: {', '.join(sorted(valid_scopes))}")
@@ -218,6 +220,10 @@ async def ansible_run(
 
     # For roles scope, optionally filter to selected roles
     filter_roles = set(roles) if scope == "roles" and roles else None
+    # For containers scope, optionally filter to selected containers
+    filter_containers = set(containers_filter) if scope == "containers" and containers_filter else None
+    # For ingress scope, optionally filter to selected hosts
+    filter_hosts = set(hosts_filter) if scope == "ingress" and hosts_filter else None
 
     prepare_ansible_workspace(
         ansible_dir, scope, settings.homelab_repo_path,
@@ -225,6 +231,8 @@ async def ansible_run(
         secret_store=secret_store,
         templates=templates,
         filter_roles=filter_roles,
+        filter_containers=filter_containers,
+        filter_hosts=filter_hosts,
     )
 
     async def stream():
@@ -273,7 +281,7 @@ async def apply_all(
         mark_applied(settings.homelab_repo_path, "terraform")
 
         # 2-5. Ansible scopes
-        for scope in ["roles", "containers", "dns", "ingress"]:
+        for scope in ["roles", "containers", "dns", "ingress", "backups"]:
             yield f"\n\n=== ANSIBLE: {scope.upper()} ===\n\n"
             ansible_dir = _ansible_dir() / scope
             scope_containers = containers if scope != "roles" else None

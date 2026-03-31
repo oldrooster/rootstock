@@ -19,8 +19,8 @@ def generate_tunnel_config(
 ) -> str:
     """Generate cloudflared tunnel config YAML for a given host.
 
-    Includes external container services and external manual rules
-    assigned to this host. All traffic routes through the local Caddy.
+    Routes directly to backend containers, bypassing Caddy.
+    Cloudflare handles TLS termination on the edge.
     """
     ingress_entries: list[str] = []
 
@@ -31,9 +31,10 @@ def generate_tunnel_config(
             continue
         if host not in ctr.hosts:
             continue
+        service = f"http://{ctr.name}:{ctr.ingress_port}" if ctr.ingress_port else f"http://{ctr.name}"
         ingress_entries.append(
             f"  - hostname: {ctr.dns_name}\n"
-            f"    service: https://caddy:443"
+            f"    service: {service}"
         )
 
     for rule in manual_rules:
@@ -41,7 +42,7 @@ def generate_tunnel_config(
             continue
         ingress_entries.append(
             f"  - hostname: {rule.hostname}\n"
-            f"    service: https://caddy:443"
+            f"    service: {rule.backend}"
         )
 
     if not ingress_entries:
@@ -164,6 +165,19 @@ def get_zone_id(api_token: str, domain: str) -> str:
     return zones[0]["id"]
 
 
+def ensure_ssl_full(api_token: str, zone_id: str) -> None:
+    """Set Cloudflare SSL/TLS mode to 'full' for a zone."""
+    r = httpx.patch(
+        f"{CF_API_BASE}/zones/{zone_id}/settings/ssl",
+        headers=_cf_headers(api_token),
+        json={"value": "full"},
+    )
+    if not r.is_success:
+        detail = r.json().get("errors", r.text)
+        raise RuntimeError(f"Failed to set SSL mode: {detail}")
+    logger.info("Set SSL/TLS mode to 'full' for zone %s", zone_id)
+
+
 def ensure_tunnel_dns(
     api_token: str,
     account_id: str,
@@ -214,21 +228,22 @@ def update_tunnel_ingress(
     api_token: str,
     account_id: str,
     tunnel_id: str,
-    hostnames: list[str],
-    origin_service: str = "https://caddy:443",
+    routes: list[tuple[str, str]],
 ) -> None:
     """Push ingress rules to the Cloudflare API for a remotely-managed tunnel.
 
-    This configures the tunnel so cloudflared knows how to route traffic.
-    Without this, cloudflared returns 503 for all requests.
+    routes: list of (hostname, service_url) tuples, e.g.
+        [("shop.cbf.nz", "http://theweeklyshop:3000")]
+
+    Routes directly to backend containers. Cloudflare handles TLS on the edge.
     """
     ingress_rules: list[dict] = []
-    for hostname in hostnames:
-        ingress_rules.append({
-            "hostname": hostname,
-            "service": origin_service,
-            "originRequest": {"noTLSVerify": True},
-        })
+    for hostname, service in routes:
+        rule: dict = {"hostname": hostname, "service": service}
+        # If routing to an HTTPS backend, skip TLS verification (self-signed certs)
+        if service.startswith("https://"):
+            rule["originRequest"] = {"noTLSVerify": True}
+        ingress_rules.append(rule)
     # Catch-all rule (required by CF API)
     ingress_rules.append({"service": "http_status:404"})
 
@@ -240,22 +255,19 @@ def update_tunnel_ingress(
     if not r.is_success:
         detail = r.json().get("errors", r.text)
         raise RuntimeError(f"Failed to update tunnel ingress config: {detail}")
-    logger.info("Updated tunnel %s ingress with %d hostname(s)", tunnel_id, len(hostnames))
+    logger.info("Updated tunnel %s ingress with %d route(s)", tunnel_id, len(routes))
 
 
 def ensure_tunnel_for_host(
     api_token: str,
     account_id: str,
     host: str,
-    hostnames: list[str],
+    routes: list[tuple[str, str]],
     zone_id: str | None = None,
 ) -> str:
-    """Ensure a tunnel exists for a host, create DNS records, and return the tunnel token.
+    """Ensure a tunnel exists for a host, configure routes, create DNS records, return token.
 
-    - Creates tunnel named 'rootstock-{host}' if it doesn't exist
-    - Pushes ingress rules to the Cloudflare API
-    - Creates CNAME DNS records for each hostname pointing to the tunnel
-    - Returns the tunnel connector token
+    routes: list of (hostname, service_url) tuples.
     """
     tunnel_name = f"rootstock-{host}"
 
@@ -272,12 +284,12 @@ def ensure_tunnel_for_host(
         logger.info("Created tunnel '%s' (id=%s)", tunnel_name, tunnel_id)
 
     # Push ingress rules to CF API so cloudflared knows how to route traffic
-    if hostnames:
-        update_tunnel_ingress(api_token, account_id, tunnel_id, hostnames)
+    if routes:
+        update_tunnel_ingress(api_token, account_id, tunnel_id, routes)
 
     # Create DNS records if zone_id provided
     if zone_id:
-        for hostname in hostnames:
+        for hostname, _ in routes:
             try:
                 ensure_tunnel_dns(api_token, account_id, zone_id, tunnel_id, hostname)
             except Exception as e:
@@ -288,13 +300,16 @@ def ensure_tunnel_for_host(
     return token
 
 
-def collect_external_hostnames(
+def collect_external_routes(
     host: str,
     containers: list[ContainerDefinition],
     manual_rules: list[ManualRule],
-) -> list[str]:
-    """Collect all external hostnames for a given host."""
-    hostnames: list[str] = []
+) -> list[tuple[str, str]]:
+    """Collect all external (hostname, service_url) routes for a given host.
+
+    Routes directly to backend containers, bypassing Caddy.
+    """
+    routes: list[tuple[str, str]] = []
     for ctr in containers:
         if not ctr.enabled or not ctr.external or not ctr.dns_name:
             continue
@@ -302,9 +317,10 @@ def collect_external_hostnames(
             continue
         if host not in ctr.hosts:
             continue
-        hostnames.append(ctr.dns_name)
+        service = f"http://{ctr.name}:{ctr.ingress_port}" if ctr.ingress_port else f"http://{ctr.name}"
+        routes.append((ctr.dns_name, service))
     for rule in manual_rules:
         if rule.caddy_host != host or not rule.external:
             continue
-        hostnames.append(rule.hostname)
-    return hostnames
+        routes.append((rule.hostname, rule.backend))
+    return routes
