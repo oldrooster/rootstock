@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.routers import apply, backups, containers, dashboard, dns, git, health, hosts, images, ingress, nodes, roles, secrets, services, settings_router, templates, terminal, vms
+from app.routers import auth_router
 
 
 @asynccontextmanager
@@ -21,6 +23,38 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Auth middleware must be registered BEFORE CORSMiddleware so that Starlette
+# wraps it in the correct order: CORS runs outermost (first), auth runs inside.
+# If auth is outermost, its 401 responses lack CORS headers and the browser
+# reports a CORS error instead of a 401.
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # Always allow CORS preflight, health check, and auth endpoints
+    if request.method == "OPTIONS" or path == "/health" or path.startswith("/auth/"):
+        return await call_next(request)
+
+    # Extract token from Authorization header or ?token= query param (for WebSockets)
+    auth_header = request.headers.get("Authorization", "")
+    token = (
+        auth_header[7:]
+        if auth_header.startswith("Bearer ")
+        else request.query_params.get("token", "")
+    )
+
+    if not token:
+        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+
+    from app.services import auth_service
+    try:
+        auth_service.verify_token(token)
+    except ValueError:
+        return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -29,6 +63,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+app.include_router(auth_router.router, prefix="/auth", tags=["auth"])
 app.include_router(health.router)
 app.include_router(containers.router, prefix="/containers", tags=["containers"])
 app.include_router(services.router, prefix="/services", tags=["services"])  # legacy alias

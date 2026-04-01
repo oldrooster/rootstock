@@ -38,6 +38,7 @@ class ContainerDefinition(BaseModel):
     dns_name: str = ""
     ingress_mode: str = "none"  # "caddy" | "direct" | "none"
     ingress_port: int = 0
+    ingress_https: bool = False  # proxy to container's HTTPS port (skips TLS verify)
     external: bool = False
     ports: list[PortMapping] = []
     volumes: list[VolumeMount] = []
@@ -102,6 +103,7 @@ class ContainerCreate(BaseModel):
     dns_name: str = ""
     ingress_mode: str = "none"
     ingress_port: int = 0
+    ingress_https: bool = False
     external: bool = False
     ports: list[PortMapping] = []
     volumes: list[VolumeMount] = []
@@ -126,6 +128,7 @@ class ContainerUpdate(BaseModel):
     dns_name: str | None = None
     ingress_mode: str | None = None
     ingress_port: int | None = None
+    ingress_https: bool | None = None
     external: bool | None = None
     ports: list[PortMapping] | None = None
     volumes: list[VolumeMount] | None = None

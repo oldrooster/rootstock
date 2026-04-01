@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { getWsUrl } from '../lib/api'
 
 interface TerminalProps {
   wsPath: string
@@ -35,8 +36,7 @@ export default function Terminal({ wsPath, title, onClose }: TerminalProps) {
     xtermRef.current = xterm
 
     // Connect WebSocket
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${protocol}//${window.location.host}${wsPath}`)
+    const ws = new WebSocket(getWsUrl(wsPath))
     wsRef.current = ws
 
     ws.onopen = () => {

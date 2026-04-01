@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
+import { getWsUrl } from '../lib/api'
 
 interface IngressRule {
   name: string
@@ -158,9 +159,8 @@ export default function Ingress() {
     setCaddyLogLines([])
     setCaddyLogHost(host)
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(
-      `${protocol}//${window.location.host}/api/ingress/caddy/${encodeURIComponent(host)}/logs`
+      getWsUrl(`/api/ingress/caddy/${encodeURIComponent(host)}/logs`)
     )
     caddyLogWsRef.current = ws
 
@@ -202,9 +202,8 @@ export default function Ingress() {
     setCfdLogLines([])
     setCfdLogHost(host)
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(
-      `${protocol}//${window.location.host}/api/ingress/cloudflared/${encodeURIComponent(host)}/logs`
+      getWsUrl(`/api/ingress/cloudflared/${encodeURIComponent(host)}/logs`)
     )
     cfdLogWsRef.current = ws
 

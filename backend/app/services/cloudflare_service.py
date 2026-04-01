@@ -31,7 +31,8 @@ def generate_tunnel_config(
             continue
         if host not in ctr.hosts:
             continue
-        service = f"http://{ctr.name}:{ctr.ingress_port}" if ctr.ingress_port else f"http://{ctr.name}"
+        scheme = "https" if ctr.ingress_https else "http"
+        service = f"{scheme}://{ctr.name}:{ctr.ingress_port}" if ctr.ingress_port else f"{scheme}://{ctr.name}"
         ingress_entries.append(
             f"  - hostname: {ctr.dns_name}\n"
             f"    service: {service}"
@@ -317,7 +318,8 @@ def collect_external_routes(
             continue
         if host not in ctr.hosts:
             continue
-        service = f"http://{ctr.name}:{ctr.ingress_port}" if ctr.ingress_port else f"http://{ctr.name}"
+        scheme = "https" if ctr.ingress_https else "http"
+        service = f"{scheme}://{ctr.name}:{ctr.ingress_port}" if ctr.ingress_port else f"{scheme}://{ctr.name}"
         routes.append((ctr.dns_name, service))
     for rule in manual_rules:
         if rule.caddy_host != host or not rule.external:

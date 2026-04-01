@@ -35,12 +35,25 @@ def generate_caddyfile(
         if host and host not in ctr.hosts:
             continue
 
-        upstream = f"{ctr.name}:{ctr.ingress_port}"
-        blocks.append(
-            f"{ctr.dns_name} {{\n"
-            f"    reverse_proxy {upstream}\n"
-            f"}}"
-        )
+        if ctr.ingress_https:
+            upstream = f"https://{ctr.name}:{ctr.ingress_port}"
+            blocks.append(
+                f"{ctr.dns_name} {{\n"
+                f"    reverse_proxy {upstream} {{\n"
+                f"        transport http {{\n"
+                f"            tls\n"
+                f"            tls_insecure_skip_verify\n"
+                f"        }}\n"
+                f"    }}\n"
+                f"}}"
+            )
+        else:
+            upstream = f"{ctr.name}:{ctr.ingress_port}"
+            blocks.append(
+                f"{ctr.dns_name} {{\n"
+                f"    reverse_proxy {upstream}\n"
+                f"}}"
+            )
 
     # Manual proxy rules
     if manual_rules:

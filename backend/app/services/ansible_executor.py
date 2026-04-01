@@ -1016,6 +1016,10 @@ def _write_backups_playbook(
         (host_files / "rootstock-backup.sh").write_text(script_content)
 
         tasks = [
+            "    - name: Ensure cron is installed\n"
+            "      package:\n"
+            "        name: cron\n"
+            "        state: present\n",
             "    - name: Deploy backup script\n"
             "      copy:\n"
             f"        src: files/{host}/rootstock-backup.sh\n"

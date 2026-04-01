@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import logo from '../assets/logo.png'
+import { clearAuth, getStoredUsername } from '../lib/api'
 
 interface NavItem {
   to: string
@@ -119,9 +120,16 @@ const DirtyDot = () => (
 const MOBILE_BREAKPOINT = 768
 
 export default function Sidebar() {
+  const navigate = useNavigate()
   const [anyDirty, setAnyDirty] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [isMobile, setIsMobile] = useState(window.innerWidth < MOBILE_BREAKPOINT)
+  const username = getStoredUsername()
+
+  const handleLogout = () => {
+    clearAuth()
+    navigate('/login', { replace: true })
+  }
 
   useEffect(() => {
     const check = () => {
@@ -181,6 +189,31 @@ export default function Sidebar() {
           )
         )}
       </ul>
+
+      {/* Logout section pinned to bottom */}
+      <div style={{ marginTop: 'auto', paddingTop: '1rem', borderTop: '1px solid #2a2a3e' }}>
+        {username && (
+          <div style={{ color: '#8890a0', fontSize: '0.78rem', padding: '0 0.5rem 0.5rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {username}
+          </div>
+        )}
+        <button
+          onClick={handleLogout}
+          style={{
+            width: '100%',
+            background: 'transparent',
+            border: '1px solid #2a2a3e',
+            borderRadius: '4px',
+            color: '#8890a0',
+            cursor: 'pointer',
+            padding: '0.4rem 0.5rem',
+            fontSize: '0.82rem',
+            textAlign: 'left',
+          }}
+        >
+          Sign out
+        </button>
+      </div>
     </>
   )
 

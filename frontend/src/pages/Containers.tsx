@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import jsYaml from 'js-yaml'
 import Terminal from '../components/Terminal'
+import { getWsUrl } from '../lib/api'
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
 interface PortMapping { host: number; container: number }
@@ -22,6 +23,7 @@ interface Container {
   dns_name: string
   ingress_mode: string
   ingress_port: number
+  ingress_https: boolean
   external: boolean
   ports: PortMapping[]
   volumes: VolumeMount[]
@@ -122,6 +124,7 @@ interface FormData {
   dns_name: string
   ingress_mode: string
   ingress_port: string
+  ingress_https: boolean
   external: boolean
   network: string
   ports_text: string
@@ -144,7 +147,7 @@ interface FormData {
 const emptyForm: FormData = {
   name: '', image: '', enabled: true,
   hosts: '', host_rule: '',
-  dns_name: '', ingress_mode: 'none', ingress_port: '', external: false,
+  dns_name: '', ingress_mode: 'none', ingress_port: '', ingress_https: false, external: false,
   network: 'backend',
   ports_text: '', volumes: [], env_text: '',
   devices_text: '',
@@ -164,6 +167,7 @@ function containerToForm(c: Container): FormData {
     dns_name: c.dns_name || '',
     ingress_mode: c.ingress_mode || 'none',
     ingress_port: c.ingress_port ? String(c.ingress_port) : '',
+    ingress_https: c.ingress_https || false,
     external: c.external || false,
     network: c.network || '',
     ports_text: (c.ports || []).map(p => `${p.host}:${p.container}`).join('\n'),
@@ -200,6 +204,7 @@ function formToPayload(f: FormData) {
     dns_name: f.dns_name,
     ingress_mode: f.ingress_mode,
     ingress_port: f.ingress_port ? Number(f.ingress_port) : 0,
+    ingress_https: f.ingress_https,
     external: f.external,
   }
 
@@ -218,7 +223,7 @@ function formToPayload(f: FormData) {
     host_path: v.host_path,
     container_path: v.container_path,
     backup: v.backup,
-    backup_exclusions: v.backup_exclusions.filter(Boolean),
+    backup_exclusions: (v.backup_exclusions || []).filter(Boolean),
   }))
 
   if (f.env_text.trim()) {
@@ -397,12 +402,12 @@ function VolumeEditor({ volumes, onChange, gap, rowGap }: {
   function addExclusion(idx: number) {
     const val = (exclInput[idx] || '').trim()
     if (!val) return
-    onChange(volumes.map((v, i) => i === idx ? { ...v, backup_exclusions: [...v.backup_exclusions, val] } : v))
+    onChange(volumes.map((v, i) => i === idx ? { ...v, backup_exclusions: [...(v.backup_exclusions || []), val] } : v))
     setExclInput({ ...exclInput, [idx]: '' })
   }
 
   function removeExclusion(volIdx: number, exclIdx: number) {
-    onChange(volumes.map((v, i) => i === volIdx ? { ...v, backup_exclusions: v.backup_exclusions.filter((_, j) => j !== exclIdx) } : v))
+    onChange(volumes.map((v, i) => i === volIdx ? { ...v, backup_exclusions: (v.backup_exclusions || []).filter((_, j) => j !== exclIdx) } : v))
   }
 
   function addVolume() {
@@ -490,7 +495,7 @@ function VolumeEditor({ volumes, onChange, gap, rowGap }: {
                   {vol.backup && (
                     <div style={{ marginLeft: '1.6rem', marginTop: '0.25rem', marginBottom: '0.25rem' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
-                        {vol.backup_exclusions.map((excl, ei) => (
+                        {(vol.backup_exclusions || []).map((excl, ei) => (
                           <span key={ei} style={{
                             fontSize: '0.7rem', padding: '0.1rem 0.4rem', borderRadius: '9999px',
                             background: 'rgba(248,113,113,0.1)', color: '#fca5a5',
@@ -548,6 +553,7 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
   // Normalize form to ensure new fields have defaults (handles stale state)
   const form: FormData = {
     ...rawForm,
+    ingress_https: rawForm.ingress_https || false,
     depends_on: rawForm.depends_on || [],
     healthcheck_test: rawForm.healthcheck_test || '',
     healthcheck_interval: rawForm.healthcheck_interval || '30s',
@@ -759,7 +765,12 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
               <input style={inputStyle} value={form.ingress_port} type="number"
                 onChange={e => set('ingress_port', e.target.value)} placeholder="8443" />
             </div>
-            <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: '0.3rem' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: '0.3rem', gap: '1rem', flexWrap: 'wrap' }}>
+              <label style={{ color: '#8890a0', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem', whiteSpace: 'nowrap' }}>
+                <input type="checkbox" checked={form.ingress_https}
+                  onChange={e => set('ingress_https', e.target.checked)} />
+                HTTPS backend
+              </label>
               <label style={{ color: '#8890a0', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem', whiteSpace: 'nowrap' }}>
                 <input type="checkbox" checked={form.external}
                   onChange={e => set('external', e.target.checked)} />
@@ -1030,9 +1041,8 @@ export default function Containers() {
     setLogLines([])
     setLogInfo({ name, host })
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(
-      `${protocol}//${window.location.host}/api/containers/${encodeURIComponent(name)}/logs?host=${encodeURIComponent(host)}`
+      getWsUrl(`/api/containers/${encodeURIComponent(name)}/logs?host=${encodeURIComponent(host)}`)
     )
     logWsRef.current = ws
 
@@ -1089,7 +1099,6 @@ export default function Containers() {
     setMigrateSteps([])
 
     const { name, sourceHost } = migrateDialog
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const params = new URLSearchParams({
       target_host: migrateTarget,
       source_host: sourceHost,
@@ -1098,7 +1107,7 @@ export default function Containers() {
       params.set('volumes', Array.from(migrateVolumes).join(','))
     }
     const ws = new WebSocket(
-      `${protocol}//${window.location.host}/api/containers/${encodeURIComponent(name)}/migrate?${params}`
+      getWsUrl(`/api/containers/${encodeURIComponent(name)}/migrate?${params}`)
     )
     migrateWsRef.current = ws
 

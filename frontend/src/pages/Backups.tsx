@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { getWsUrl } from '../lib/api'
 
 function describeCron(expr: string): string {
   if (!expr.trim()) return ''
@@ -430,10 +431,9 @@ export default function Backups() {
     setBackupRunning(true)
     setBackupSteps([])
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const params = new URLSearchParams()
     params.set('volumes', Array.from(backupSelection).join(','))
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/backups/run?${params}`)
+    const ws = new WebSocket(getWsUrl(`/api/backups/run?${params}`))
     backupWsRef.current = ws
 
     ws.onmessage = (e) => {
@@ -541,7 +541,6 @@ export default function Backups() {
     setRestoreRunning(true)
     setRestoreSteps([])
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const params = new URLSearchParams({
       host: restoreHost,
       paths: Array.from(restoreSelection).join(','),
@@ -550,7 +549,7 @@ export default function Backups() {
     if (restoreTargetHost && restoreTargetHost !== restoreHost) {
       params.set('target_host', restoreTargetHost)
     }
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/backups/restore?${params}`)
+    const ws = new WebSocket(getWsUrl(`/api/backups/restore?${params}`))
     restoreWsRef.current = ws
 
     ws.onmessage = (e) => {
