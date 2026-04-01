@@ -48,11 +48,12 @@ def generate_caddyfile(
             if host and rule.caddy_host != host:
                 continue
             # If backend is HTTPS, add tls_insecure_skip_verify for self-signed certs
-            if rule.backend.startswith("https://"):
+            if rule.backend.lower().startswith("https://"):
                 blocks.append(
                     f"{rule.hostname} {{\n"
                     f"    reverse_proxy {rule.backend} {{\n"
                     f"        transport http {{\n"
+                    f"            tls\n"
                     f"            tls_insecure_skip_verify\n"
                     f"        }}\n"
                     f"    }}\n"

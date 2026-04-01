@@ -751,7 +751,9 @@ export default function Backups() {
             {hostTotal > 0 && (
               <div style={{ color: '#6b7280', fontSize: '0.7rem', marginTop: '0.25rem' }}>{formatBytes(hostTotal)}</div>
             )}
-            {cronStatus[host] && (
+            {cronLoading ? (
+              <div style={{ marginTop: '0.35rem', fontSize: '0.65rem', color: '#6b7280' }}>...</div>
+            ) : cronStatus[host] ? (
               <div style={{
                 marginTop: '0.35rem', fontSize: '0.65rem', padding: '0.15rem 0.4rem',
                 borderRadius: '9999px', display: 'inline-block',
@@ -760,7 +762,7 @@ export default function Backups() {
               }}>
                 {cronStatus[host].installed ? 'cron active' : 'no cron'}
               </div>
-            )}
+            ) : null}
           </div>
           )
         })}

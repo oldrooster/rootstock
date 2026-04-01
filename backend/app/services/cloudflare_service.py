@@ -241,7 +241,7 @@ def update_tunnel_ingress(
     for hostname, service in routes:
         rule: dict = {"hostname": hostname, "service": service}
         # If routing to an HTTPS backend, skip TLS verification (self-signed certs)
-        if service.startswith("https://"):
+        if service.lower().startswith("https://"):
             rule["originRequest"] = {"noTLSVerify": True}
         ingress_rules.append(rule)
     # Catch-all rule (required by CF API)
