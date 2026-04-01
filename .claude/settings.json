@@ -10,7 +10,12 @@
       "Bash(grep -r \"export\" /home/guybrush/rootstock/backend/app/routers/*.py)",
       "Bash(done)",
       "Bash(wc -l /home/guybrush/rootstock/backend/app/services/*.py)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "Bash(git status:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(ls ~/.ssh/id_*.pub)",
+      "Bash(ls ~/.ssh/*.pub)"
     ]
   }
 }

@@ -350,6 +350,41 @@ def _write_containers_playbook(
                     f"      changed_when: \"'Pull complete' in pull_result.stderr or 'Downloaded newer' in pull_result.stderr\"\n"
                 )
 
+    # Remove pre-existing containers not managed by compose to avoid name conflicts
+    tasks.append(
+        "    - name: Get compose-managed container IDs\n"
+        "      command: docker compose -f /opt/docker/docker-compose.yml ps -q\n"
+        "      args:\n"
+        "        chdir: /opt/docker\n"
+        "      register: compose_ids\n"
+        "      failed_when: false\n"
+        "      changed_when: false\n"
+    )
+    tasks.append(
+        "    - name: Get compose service names\n"
+        "      command: docker compose -f /opt/docker/docker-compose.yml config --services\n"
+        "      args:\n"
+        "        chdir: /opt/docker\n"
+        "      register: compose_services\n"
+        "      changed_when: false\n"
+    )
+    tasks.append(
+        "    - name: Remove conflicting containers not managed by compose\n"
+        "      shell: |\n"
+        "        for name in {{ compose_services.stdout_lines | join(' ') }}; do\n"
+        "          existing=$(docker ps -aq --filter \"name=^/${name}$\" 2>/dev/null)\n"
+        "          if [ -n \"$existing\" ]; then\n"
+        "            compose_ids=\"{{ compose_ids.stdout | default('') }}\"\n"
+        "            if ! echo \"$compose_ids\" | grep -q \"$existing\"; then\n"
+        "              docker rm -f \"$existing\" || true\n"
+        "            fi\n"
+        "          fi\n"
+        "        done\n"
+        "      args:\n"
+        "        executable: /bin/bash\n"
+        "      changed_when: false\n"
+    )
+
     tasks.append(
         f"    - name: Start containers\n"
         f"      command: docker compose -f /opt/docker/docker-compose.yml up -d --remove-orphans\n"
