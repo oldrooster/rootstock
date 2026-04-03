@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# --- In-memory stats cache ---
+# --- In-memory stats cache ----
 
 class PathStat(BaseModel):
     host: str
