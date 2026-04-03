@@ -4,7 +4,7 @@ import Terminal from '../components/Terminal'
 import { getWsUrl } from '../lib/api'
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
 
-interface PortMapping { host: number; container: number }
+interface PortMapping { host: number; container: number; protocol?: string }
 interface VolumeMount { host_path: string; container_path: string; backup: boolean; backup_exclusions: string[] }
 
 interface HealthCheck {
