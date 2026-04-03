@@ -1,5 +1,6 @@
-import { useEffect, useState, lazy, Suspense } from 'react'
+import { useEffect, useRef, useState, lazy, Suspense } from 'react'
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
+import { getWsUrl } from '../lib/api'
 
 const Terminal = lazy(() => import('../components/Terminal'))
 
@@ -18,6 +19,8 @@ interface VM {
   ssh_key: string
   gpu_passthrough: boolean
   roles: string[]
+  managed: boolean
+  provisioned: boolean
 }
 
 interface Template {
@@ -142,7 +145,7 @@ function formToPayload(f: FormData) {
   }
 }
 
-function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, infraNodes, templates, allVms, currentName }: {
+function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, infraNodes, templates, allVms, currentName, isUnmanaged }: {
   form: FormData
   setForm: (f: FormData) => void
   onSubmit: () => void
@@ -153,6 +156,7 @@ function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, i
   templates: Template[]
   allVms?: VM[]
   currentName?: string
+  isUnmanaged?: boolean
 }) {
   const set = (field: keyof FormData, value: string | boolean) =>
     setForm({ ...form, [field]: value })
@@ -257,22 +261,35 @@ function VMForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName, i
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
-        <div>
-          <label style={labelStyle}>User</label>
-          <input style={inputStyle} value={form.user}
-            onChange={e => set('user', e.target.value)} placeholder="deploy" />
-        </div>
-        <div>
-          <label style={labelStyle}>Roles</label>
-          <input style={inputStyle} value={form.roles}
-            onChange={e => set('roles', e.target.value)} placeholder="docker, monitoring" />
-        </div>
-        <div>
-          <label style={labelStyle}>SSH Key</label>
-          <input style={inputStyle} value={form.ssh_key}
-            onChange={e => set('ssh_key', e.target.value)} placeholder="ssh-ed25519 AAAA... or ssh/name/public_key" />
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: isUnmanaged ? '1fr 1fr' : '1fr 1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+        {!isUnmanaged && (
+          <div>
+            <label style={labelStyle}>User</label>
+            <input style={inputStyle} value={form.user}
+              onChange={e => set('user', e.target.value)} placeholder="deploy" />
+          </div>
+        )}
+        {!isUnmanaged && (
+          <div>
+            <label style={labelStyle}>Roles</label>
+            <input style={inputStyle} value={form.roles}
+              onChange={e => set('roles', e.target.value)} placeholder="docker, monitoring" />
+          </div>
+        )}
+        {!isUnmanaged && (
+          <div>
+            <label style={labelStyle}>SSH Key</label>
+            <input style={inputStyle} value={form.ssh_key}
+              onChange={e => set('ssh_key', e.target.value)} placeholder="ssh-ed25519 AAAA... or ssh/name/public_key" />
+          </div>
+        )}
+        {isUnmanaged && (
+          <div style={{ gridColumn: '1 / -1' }}>
+            <p style={{ color: '#f59e0b', fontSize: '0.8rem', margin: 0 }}>
+              Unmanaged VM — no SSH access, roles, or container deployments.
+            </p>
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
@@ -335,7 +352,20 @@ export default function VMs() {
   const [editForm, setEditForm] = useState<FormData>(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [terminalVM, setTerminalVM] = useState<string | null>(null)
+  const [filterNode, setFilterNode] = useState<string | null>(null)
   useUnsavedChanges(showAdd || editingName !== null)
+
+  // Migration state
+  interface MigrateStep { step: string; status: string; detail: string }
+  const [migrateDialog, setMigrateDialog] = useState<{ name: string; sourceNode: string } | null>(null)
+  const [migrateTarget, setMigrateTarget] = useState('')
+  const [migrateStorage, setMigrateStorage] = useState('')
+  const [migrateStorages, setMigrateStorages] = useState<{ storage: string; type: string }[]>([])
+  const [migrateStoragesLoading, setMigrateStoragesLoading] = useState(false)
+  const [deleteSource, setDeleteSource] = useState(true)
+  const [migrateSteps, setMigrateSteps] = useState<MigrateStep[]>([])
+  const [migrateRunning, setMigrateRunning] = useState(false)
+  const migrateWsRef = useRef<WebSocket | null>(null)
 
   // Import state
   const [showImport, setShowImport] = useState(false)
@@ -356,11 +386,43 @@ export default function VMs() {
   const [generateResult, setGenerateResult] = useState<{ success: boolean; detail: string } | null>(null)
   const [secretKeys, setSecretKeys] = useState<string[]>([])
   const [selectedSecret, setSelectedSecret] = useState('')
+  const [importUnmanaged, setImportUnmanaged] = useState(false)
+
+  const [powerStatus, setPowerStatus] = useState<Record<string, string>>({})
+  const [powerLoading, setPowerLoading] = useState<Record<string, boolean>>({})
+
+  async function loadPowerStatus(vmName: string) {
+    try {
+      const r = await fetch(`/api/vms/${encodeURIComponent(vmName)}/status`)
+      if (!r.ok) return
+      const data = await r.json()
+      setPowerStatus(prev => ({ ...prev, [vmName]: data.status }))
+    } catch {}
+  }
+
+  async function powerAction(vmName: string, action: 'start' | 'stop') {
+    setPowerLoading(prev => ({ ...prev, [vmName]: true }))
+    try {
+      const r = await fetch(`/api/vms/${encodeURIComponent(vmName)}/power/${action}`, { method: 'POST' })
+      if (!r.ok) {
+        const data = await r.json().catch(() => null)
+        throw new Error(data?.detail || `HTTP ${r.status}`)
+      }
+      setPowerStatus(prev => ({ ...prev, [vmName]: action === 'start' ? 'running' : 'stopped' }))
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setPowerLoading(prev => ({ ...prev, [vmName]: false }))
+    }
+  }
 
   function loadVMs() {
     fetch('/api/vms/')
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-      .then(setVMs)
+      .then((data: VM[]) => {
+        setVMs(data)
+        data.forEach(v => loadPowerStatus(v.name))
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }
@@ -420,6 +482,7 @@ export default function VMs() {
     setImportPassword('')
     setGenerateResult(null)
     setSelectedSecret('')
+    setImportUnmanaged(false)
   }
 
   async function testSSH() {
@@ -503,9 +566,10 @@ export default function VMs() {
           cpu: selectedVM.cpu,
           memory: selectedVM.memory,
           disk: selectedVM.disk,
-          user: importUser,
-          ssh_private_key: importKey,
-          roles: importRoles.split(',').map(s => s.trim()).filter(Boolean),
+          user: importUnmanaged ? '' : importUser,
+          ssh_private_key: importUnmanaged ? '' : importKey,
+          roles: importUnmanaged ? [] : importRoles.split(',').map(s => s.trim()).filter(Boolean),
+          managed: !importUnmanaged,
         }),
       })
       if (!r.ok) {
@@ -529,6 +593,7 @@ export default function VMs() {
     setDiscovered([])
     setSelectedVM(null)
     setDiscoverError(null)
+    setImportUnmanaged(false)
   }
 
   async function handleCreate() {
@@ -581,6 +646,82 @@ export default function VMs() {
     }
   }
 
+  async function fetchMigrateStorages(nodeName: string) {
+    setMigrateStoragesLoading(true)
+    setMigrateStorages([])
+    setMigrateStorage('')
+    try {
+      const r = await fetch(`/api/vms/nodes/${encodeURIComponent(nodeName)}/storages`)
+      if (!r.ok) return
+      const data: { storage: string; type: string; content: string }[] = await r.json()
+      // Show all storages but highlight ones that support images/disk
+      const filtered = data.filter(s => s.content.includes('images') || s.content.includes('rootdir'))
+      setMigrateStorages(filtered.length > 0 ? filtered : data)
+      if (filtered.length > 0) setMigrateStorage(filtered[0].storage)
+      else if (data.length > 0) setMigrateStorage(data[0].storage)
+    } catch {}
+    finally { setMigrateStoragesLoading(false) }
+  }
+
+  function openMigrate(vm: VM) {
+    setMigrateDialog({ name: vm.name, sourceNode: vm.node })
+    setMigrateTarget('')
+    setMigrateStorage('')
+    setMigrateStorages([])
+    setDeleteSource(true)
+    setMigrateSteps([])
+    setMigrateRunning(false)
+  }
+
+  function startMigration() {
+    if (!migrateDialog || !migrateTarget) return
+    setMigrateRunning(true)
+    setMigrateSteps([])
+    const params = new URLSearchParams({
+      target_node: migrateTarget,
+      target_storage: migrateStorage,
+      delete_source: deleteSource ? 'true' : 'false',
+    })
+    const ws = new WebSocket(getWsUrl(`/api/vms/${encodeURIComponent(migrateDialog.name)}/migrate?${params}`))
+    migrateWsRef.current = ws
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data) as MigrateStep
+      setMigrateSteps(prev => {
+        const idx = prev.findIndex(s => s.step === msg.step)
+        if (idx >= 0) {
+          const updated = [...prev]
+          updated[idx] = msg
+          return updated
+        }
+        return [...prev, msg]
+      })
+    }
+    ws.onclose = () => {
+      setMigrateRunning(false)
+      migrateWsRef.current = null
+      loadVMs()
+    }
+  }
+
+  function closeMigrate() {
+    if (migrateWsRef.current) { migrateWsRef.current.close(); migrateWsRef.current = null }
+    setMigrateDialog(null)
+    setMigrateSteps([])
+    setMigrateRunning(false)
+  }
+
+  const STEP_LABELS: Record<string, string> = {
+    validate: 'Validate',
+    discover: 'Discover VMID',
+    shutdown: 'Shutdown VM',
+    dump: 'Create backup (vzdump)',
+    transfer: 'Transfer backup',
+    restore: 'Restore on target',
+    update: 'Update configuration',
+    cleanup: 'Clean up',
+    commit: 'Commit to git',
+  }
+
   if (loading) return <p style={{ color: '#8890a0' }}>Loading...</p>
 
   return (
@@ -621,6 +762,43 @@ export default function VMs() {
         />
       )}
 
+      {/* Filter bar */}
+      {vms.length > 0 && !showAdd && (() => {
+        const allNodes = [...new Set(vms.map(v => v.node))].sort()
+        if (allNodes.length <= 1) return null
+        return (
+          <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', marginRight: '0.25rem' }}>Filter:</span>
+            <button
+              style={{
+                fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '9999px', cursor: 'pointer',
+                border: '1px solid #2a2a3e',
+                background: filterNode === null ? '#7c9ef8' : 'transparent',
+                color: filterNode === null ? '#0f0f1a' : '#b0b8d0',
+                fontWeight: filterNode === null ? 600 : 400,
+              }}
+              onClick={() => setFilterNode(null)}
+            >All ({vms.length})</button>
+            {allNodes.map(n => {
+              const count = vms.filter(v => v.node === n).length
+              const active = filterNode === n
+              return (
+                <button key={n}
+                  style={{
+                    fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '9999px', cursor: 'pointer',
+                    border: '1px solid #2a2a3e',
+                    background: active ? '#7c9ef8' : 'transparent',
+                    color: active ? '#0f0f1a' : '#b0b8d0',
+                    fontWeight: active ? 600 : 400,
+                  }}
+                  onClick={() => setFilterNode(active ? null : n)}
+                >{n} ({count})</button>
+              )
+            })}
+          </div>
+        )
+      })()}
+
       {vms.length === 0 && !showAdd && (
         <p style={{ color: '#8890a0' }}>No VMs defined yet.</p>
       )}
@@ -635,7 +813,7 @@ export default function VMs() {
         </Suspense>
       )}
 
-      {vms.map(vm => (
+      {vms.filter(v => filterNode === null || v.node === filterNode).map(vm => (
         <div key={vm.name} style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', marginBottom: '0.75rem' }}>
           {editingName === vm.name ? (
             <VMForm
@@ -649,6 +827,7 @@ export default function VMs() {
               templates={templates}
               allVms={vms}
               currentName={vm.name}
+              isUnmanaged={!vm.managed}
             />
           ) : (
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -664,6 +843,34 @@ export default function VMs() {
                   }}>
                     {vm.enabled ? 'enabled' : 'disabled'}
                   </span>
+                  {!vm.provisioned && (!powerStatus[vm.name] || powerStatus[vm.name] === 'unknown') && (
+                    <span style={{
+                      fontSize: '0.7rem',
+                      padding: '0.15rem 0.5rem',
+                      borderRadius: '9999px',
+                      background: 'rgba(107,114,128,0.2)',
+                      color: '#9ca3af',
+                      border: '1px dashed #4b5563',
+                    }}>not provisioned</span>
+                  )}
+                  {!vm.managed && (
+                    <span style={{
+                      fontSize: '0.7rem',
+                      padding: '0.15rem 0.5rem',
+                      borderRadius: '9999px',
+                      background: 'rgba(245,158,11,0.15)',
+                      color: '#f59e0b',
+                    }}>unmanaged</span>
+                  )}
+                  {powerStatus[vm.name] && (
+                    <span style={{
+                      fontSize: '0.7rem',
+                      padding: '0.15rem 0.5rem',
+                      borderRadius: '9999px',
+                      background: powerStatus[vm.name] === 'running' ? '#166534' : '#374151',
+                      color: powerStatus[vm.name] === 'running' ? '#86efac' : '#9ca3af',
+                    }}>{powerStatus[vm.name]}</span>
+                  )}
                   {(vm.roles || []).map(r => (
                     <span key={r} style={{
                       fontSize: '0.7rem',
@@ -717,12 +924,34 @@ export default function VMs() {
                   </>
                 ) : (
                   <>
-                    <button style={{ ...btnSecondary, borderColor: '#22c55e', color: '#22c55e' }}
-                      onClick={() => setTerminalVM(vm.name)}>SSH</button>
+                    {vm.managed && (
+                      <button style={{ ...btnSecondary, borderColor: '#22c55e', color: '#22c55e' }}
+                        onClick={() => setTerminalVM(vm.name)}>SSH</button>
+                    )}
+                    <button
+                      style={{
+                        ...btnSecondary,
+                        borderColor: (powerLoading[vm.name] || powerStatus[vm.name] === 'running') ? '#2a2a3e' : '#38bdf8',
+                        color: (powerLoading[vm.name] || powerStatus[vm.name] === 'running') ? '#4b5563' : '#38bdf8',
+                      }}
+                      disabled={powerLoading[vm.name] || powerStatus[vm.name] === 'running'}
+                      onClick={() => powerAction(vm.name, 'start')}
+                    >Start</button>
+                    <button
+                      style={{
+                        ...btnSecondary,
+                        borderColor: (powerLoading[vm.name] || powerStatus[vm.name] === 'stopped') ? '#2a2a3e' : '#fb923c',
+                        color: (powerLoading[vm.name] || powerStatus[vm.name] === 'stopped') ? '#4b5563' : '#fb923c',
+                      }}
+                      disabled={powerLoading[vm.name] || powerStatus[vm.name] === 'stopped'}
+                      onClick={() => powerAction(vm.name, 'stop')}
+                    >Stop</button>
                     <button style={btnSecondary} onClick={() => {
                       setEditingName(vm.name)
                       setEditForm(vmToForm(vm))
                     }}>Edit</button>
+                    <button style={{ ...btnSecondary, borderColor: '#a78bfa', color: '#a78bfa' }}
+                      onClick={() => openMigrate(vm)}>Migrate</button>
                     <button style={{ ...btnSecondary, borderColor: '#ef4444', color: '#ef4444' }}
                       onClick={() => setDeleteConfirm(vm.name)}>Destroy</button>
                   </>
@@ -732,6 +961,108 @@ export default function VMs() {
           )}
         </div>
       ))}
+
+      {/* Migrate VM Dialog */}
+      {migrateDialog && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ background: '#1a1a2e', borderRadius: '8px', padding: '1.5rem', width: '540px', maxHeight: '80vh', overflow: 'auto', border: '1px solid #2a2a3e' }}>
+            <h2 style={{ color: '#e0e0e0', fontSize: '1.1rem', margin: '0 0 0.25rem 0' }}>
+              Migrate VM: {migrateDialog.name}
+            </h2>
+            <p style={{ color: '#8890a0', fontSize: '0.82rem', margin: '0 0 1.25rem 0' }}>
+              Source: {migrateDialog.sourceNode} &mdash; uses vzdump + transfer + qmrestore
+            </p>
+
+            {/* Config (only before migration starts) */}
+            {migrateSteps.length === 0 && (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                  <div>
+                    <label style={{ color: '#8890a0', fontSize: '0.75rem', display: 'block', marginBottom: '0.25rem' }}>Target Node</label>
+                    <select
+                      style={inputStyle}
+                      value={migrateTarget}
+                      onChange={e => {
+                        setMigrateTarget(e.target.value)
+                        if (e.target.value) fetchMigrateStorages(e.target.value)
+                        else { setMigrateStorages([]); setMigrateStorage('') }
+                      }}
+                    >
+                      <option value="">Select target node...</option>
+                      {infraNodes.filter(n => n.enabled && n.name !== migrateDialog.sourceNode).map(n => (
+                        <option key={n.name} value={n.name}>{n.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ color: '#8890a0', fontSize: '0.75rem', display: 'block', marginBottom: '0.25rem' }}>
+                      Target Storage {migrateStoragesLoading && <span style={{ color: '#6b7280' }}>(loading...)</span>}
+                    </label>
+                    {migrateStorages.length > 0 ? (
+                      <select style={inputStyle} value={migrateStorage} onChange={e => setMigrateStorage(e.target.value)}>
+                        {migrateStorages.map(s => (
+                          <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        style={inputStyle}
+                        value={migrateStorage}
+                        onChange={e => setMigrateStorage(e.target.value)}
+                        placeholder={migrateTarget ? 'local-lvm' : 'Select a node first'}
+                        disabled={!migrateTarget || migrateStoragesLoading}
+                      />
+                    )}
+                  </div>
+                </div>
+                <label style={{ color: '#8890a0', fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1.25rem' }}>
+                  <input type="checkbox" checked={deleteSource} onChange={e => setDeleteSource(e.target.checked)} />
+                  Delete VM from source after successful migration
+                </label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button style={btnPrimary} onClick={startMigration} disabled={!migrateTarget || !migrateStorage || migrateStoragesLoading}>
+                    Start Migration
+                  </button>
+                  <button style={btnSecondary} onClick={closeMigrate}>Cancel</button>
+                </div>
+              </>
+            )}
+
+            {/* Progress steps */}
+            {migrateSteps.length > 0 && (
+              <div style={{ marginTop: '0.25rem' }}>
+                {migrateSteps.map(s => {
+                  const icon = s.status === 'done' ? '✓' : s.status === 'error' ? '✗' : s.status === 'running' ? '⋯' : '–'
+                  const color = s.status === 'done' ? '#22c55e' : s.status === 'error' ? '#ef4444' : s.status === 'running' ? '#f59e0b' : '#6b7280'
+                  return (
+                    <div key={s.step} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', padding: '0.4rem 0', borderBottom: '1px solid #1f1f33' }}>
+                      <span style={{ color, fontWeight: 700, width: '1.2rem', flexShrink: 0 }}>{icon}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: '#b0b8d0', fontSize: '0.85rem', fontWeight: 500 }}>
+                          {STEP_LABELS[s.step] || s.step}
+                        </div>
+                        {s.detail && (
+                          <div style={{ color: '#6b7a94', fontSize: '0.75rem', fontFamily: 'monospace', marginTop: '0.1rem', wordBreak: 'break-word' }}>
+                            {s.detail}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+                {migrateRunning && (
+                  <div style={{ color: '#8890a0', fontSize: '0.8rem', marginTop: '0.75rem' }}>Migration in progress...</div>
+                )}
+                {!migrateRunning && (
+                  <div style={{ marginTop: '1rem' }}>
+                    <button style={btnPrimary} onClick={closeMigrate}>Close</button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Import VM Dialog */}
       {showImport && (
@@ -855,23 +1186,44 @@ export default function VMs() {
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
-                  <div>
-                    <label style={labelStyle}>SSH User</label>
-                    <input style={inputStyle} value={importUser}
-                      onChange={e => { setImportUser(e.target.value); setSSHTestResult(null) }}
-                      placeholder="deploy" />
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Roles (comma-separated)</label>
-                    <input style={inputStyle} value={importRoles}
-                      onChange={e => setImportRoles(e.target.value)}
-                      placeholder="docker, monitoring" />
-                  </div>
-                </div>
+                {/* Unmanaged toggle */}
+                <label style={{ color: '#8890a0', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.85rem' }}>
+                  <input type="checkbox" checked={importUnmanaged}
+                    onChange={e => {
+                      setImportUnmanaged(e.target.checked)
+                      setSSHTestResult(null)
+                      setImportKey('')
+                    }} />
+                  Import as unmanaged (no SSH — power control only)
+                </label>
 
-                {/* SSH mode tabs */}
-                <div style={{ display: 'flex', gap: '0', marginBottom: '0.75rem' }}>
+                {!importUnmanaged && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                    <div>
+                      <label style={labelStyle}>SSH User</label>
+                      <input style={inputStyle} value={importUser}
+                        onChange={e => { setImportUser(e.target.value); setSSHTestResult(null) }}
+                        placeholder="deploy" />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Roles (comma-separated)</label>
+                      <input style={inputStyle} value={importRoles}
+                        onChange={e => setImportRoles(e.target.value)}
+                        placeholder="docker, monitoring" />
+                    </div>
+                  </div>
+                )}
+
+                {importUnmanaged && (
+                  <div style={{ background: '#0f0f1a', border: '1px solid #2a2a3e', borderRadius: '4px', padding: '0.6rem 0.75rem', marginBottom: '0.85rem' }}>
+                    <p style={{ color: '#f59e0b', fontSize: '0.82rem', margin: 0 }}>
+                      This VM will be imported without SSH access. You can start/stop it via Proxmox, but cannot deploy roles or containers to it.
+                    </p>
+                  </div>
+                )}
+
+                {/* SSH mode tabs — only shown for managed imports */}
+                {!importUnmanaged && <div style={{ display: 'flex', gap: '0', marginBottom: '0.75rem' }}>
                   {(['existing', 'generate', 'secret'] as const).map((mode, i, arr) => (
                     <button
                       key={mode}
@@ -890,9 +1242,9 @@ export default function VMs() {
                       }}
                     >{{ existing: 'Paste Key', generate: 'Generate from Password', secret: 'Use Secret' }[mode]}</button>
                   ))}
-                </div>
+                </div>}
 
-                {sshMode === 'existing' && (
+                {!importUnmanaged && sshMode === 'existing' && (
                   <>
                     <div style={{ marginBottom: '0.75rem' }}>
                       <label style={labelStyle}>SSH Private Key (PEM)</label>
@@ -925,7 +1277,7 @@ export default function VMs() {
                   </>
                 )}
 
-                {sshMode === 'generate' && (
+                {!importUnmanaged && sshMode === 'generate' && (
                   <>
                     <div style={{ marginBottom: '0.75rem' }}>
                       <label style={labelStyle}>Password for {importUser}@{selectedVM.ip || '...'}</label>
@@ -959,7 +1311,7 @@ export default function VMs() {
                   </>
                 )}
 
-                {sshMode === 'secret' && (
+                {!importUnmanaged && sshMode === 'secret' && (
                   <>
                     <div style={{ marginBottom: '0.75rem' }}>
                       <label style={labelStyle}>SSH Private Key Secret</label>
@@ -1007,9 +1359,9 @@ export default function VMs() {
                   <button
                     style={btnPrimary}
                     onClick={handleImport}
-                    disabled={importing || !importKey.trim() || (!!selectedVM.ip && !sshTestResult?.success)}
+                    disabled={importing || (!importUnmanaged && (!importKey.trim() || (!!selectedVM.ip && !sshTestResult?.success)))}
                   >
-                    {importing ? 'Importing...' : 'Import VM'}
+                    {importing ? 'Importing...' : importUnmanaged ? 'Import as Unmanaged' : 'Import VM'}
                   </button>
                 </div>
               </>

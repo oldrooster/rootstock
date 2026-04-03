@@ -170,7 +170,7 @@ function containerToForm(c: Container): FormData {
     ingress_https: c.ingress_https || false,
     external: c.external || false,
     network: c.network || '',
-    ports_text: (c.ports || []).map(p => `${p.host}:${p.container}`).join('\n'),
+    ports_text: (c.ports || []).map(p => p.protocol && p.protocol !== 'tcp' ? `${p.host}:${p.container}/${p.protocol}` : `${p.host}:${p.container}`).join('\n'),
     volumes: (c.volumes || []).map(v => ({
       host_path: v.host_path,
       container_path: v.container_path,
@@ -212,8 +212,9 @@ function formToPayload(f: FormData) {
 
   if (f.ports_text.trim()) {
     payload.ports = f.ports_text.trim().split('\n').filter(Boolean).map(line => {
-      const [h, c] = line.split(':')
-      return { host: Number(h), container: Number(c) }
+      const [h, rest] = line.split(':')
+      const [containerPart, protocol] = rest.split('/')
+      return { host: Number(h), container: Number(containerPart), protocol: protocol || 'tcp' }
     })
   } else {
     payload.ports = []
@@ -786,9 +787,9 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
               onChange={e => set('network', e.target.value)} placeholder="backend" />
           </div>
           <div>
-            <label style={labelStyle}>Ports (host:container per line)</label>
+            <label style={labelStyle}>Ports (host:container per line, append /udp for UDP)</label>
             <textarea style={{ ...inputStyle, minHeight: '2.2rem', resize: 'vertical', fontFamily: 'monospace' }} value={form.ports_text}
-              onChange={e => set('ports_text', e.target.value)} placeholder="8443:8443&#10;3478:3478" />
+              onChange={e => set('ports_text', e.target.value)} placeholder="8443:8443&#10;3478:3478/udp&#10;1900:1900/udp" />
           </div>
         </div>
       </div>

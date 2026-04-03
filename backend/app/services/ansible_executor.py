@@ -845,6 +845,10 @@ def _write_ingress_playbook(
             "      when: >\n"
             "        cfd_running.rc != 0 or cfd_running.stdout != 'true'\n"
             "        or tunnel_token not in (cfd_cmd.stdout | default(''))\n",
+            "    - name: Restart cloudflared to pick up updated tunnel ingress rules\n"
+            "      command: docker restart cloudflared\n"
+            "      failed_when: false\n"
+            "      changed_when: true\n",
         ]
 
         content += (

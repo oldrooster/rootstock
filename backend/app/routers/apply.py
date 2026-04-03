@@ -8,6 +8,7 @@ from app.config import settings
 from app.services.ansible_executor import prepare_ansible_workspace, run_ansible
 from app.services.apply_state import get_dirty_areas, mark_all_applied, mark_applied
 from app.services.container_store import ContainerStore
+from app.services.git_service import GitService
 from app.services.image_store import ImageStore
 from app.services.node_store import NodeStore
 from app.services.secret_store import SecretStore
@@ -152,10 +153,26 @@ async def terraform_apply(
             yield line
 
         yield "\n--- terraform apply ---\n"
+        apply_succeeded = False
         async for line in run_terraform(["apply", "-auto-approve", "-no-color"], tf_dir):
             yield line
+            if "completed successfully" in line:
+                apply_succeeded = True
 
-        mark_applied(settings.homelab_repo_path, "terraform")
+        if apply_succeeded:
+            mark_applied(settings.homelab_repo_path, "terraform")
+            # Mark all enabled VMs as provisioned
+            store = VMStore(settings.homelab_repo_path)
+            git = GitService(settings.homelab_repo_path)
+            updated = False
+            for vm in store.list_all():
+                if vm.enabled and not vm.provisioned:
+                    vm.provisioned = True
+                    store.write(vm)
+                    updated = True
+            if updated:
+                git.commit_all("[terraform] mark VMs as provisioned")
+                yield "\n--- Marked newly provisioned VMs ---\n"
 
     return StreamingResponse(stream(), media_type="text/plain")
 

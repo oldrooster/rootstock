@@ -24,6 +24,8 @@ class VMDefinition(BaseModel):
     ssh_key: str = ""
     gpu_passthrough: bool = False
     roles: list[str] = []
+    managed: bool = True  # False = imported without SSH; power-only via Proxmox API
+    provisioned: bool = False  # True once a successful terraform apply has created the VM
 
     @model_validator(mode="before")
     @classmethod
@@ -59,6 +61,8 @@ class VMCreate(BaseModel):
     ssh_key: str = ""
     gpu_passthrough: bool = False
     roles: list[str] = []
+    managed: bool = True
+    provisioned: bool = False
 
 
 class VMUpdate(BaseModel):
@@ -75,3 +79,5 @@ class VMUpdate(BaseModel):
     ssh_key: str | None = None
     gpu_passthrough: bool | None = None
     roles: list[str] | None = None
+    managed: bool | None = None
+    provisioned: bool | None = None

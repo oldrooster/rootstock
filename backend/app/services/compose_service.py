@@ -79,7 +79,10 @@ def generate_compose(
 
         # Ports
         if ctr.ports:
-            svc["ports"] = [f"{p.host}:{p.container}" for p in ctr.ports]
+            svc["ports"] = [
+                f"{p.host}:{p.container}/{p.protocol}" if p.protocol != "tcp" else f"{p.host}:{p.container}"
+                for p in ctr.ports
+            ]
 
         # Volumes
         if ctr.volumes:

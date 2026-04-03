@@ -4,6 +4,7 @@ from pydantic import BaseModel, model_validator
 class PortMapping(BaseModel):
     host: int
     container: int
+    protocol: str = "tcp"  # "tcp" | "udp"
 
 
 class HealthCheck(BaseModel):

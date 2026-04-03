@@ -40,6 +40,10 @@ def generate_caddyfile(
             blocks.append(
                 f"{ctr.dns_name} {{\n"
                 f"    reverse_proxy {upstream} {{\n"
+                f"        header_up Host {{host}}\n"
+                f"        header_up X-Real-IP {{remote_host}}\n"
+                f"        header_up X-Forwarded-For {{remote_host}}\n"
+                f"        header_up X-Forwarded-Proto {{scheme}}\n"
                 f"        transport http {{\n"
                 f"            tls\n"
                 f"            tls_insecure_skip_verify\n"
