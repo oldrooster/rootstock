@@ -188,6 +188,7 @@ export default function Apply() {
   // Ansible options
   const [ansibleDiff, setAnsibleDiff] = useState(true)
   const [ansibleVerbosity, setAnsibleVerbosity] = useState(0)
+  const [ansibleFreeStrategy, setAnsibleFreeStrategy] = useState(false)
 
   const fetchStatus = () => {
     Promise.all([
@@ -347,6 +348,10 @@ export default function Apply() {
           <input type="checkbox" checked={ansibleDiff} onChange={e => setAnsibleDiff(e.target.checked)} />
           --diff
         </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#b0b8d0', fontSize: '0.85rem', cursor: 'pointer' }} title="Run all hosts in parallel (strategy: free) — containers scope only">
+          <input type="checkbox" checked={ansibleFreeStrategy} onChange={e => setAnsibleFreeStrategy(e.target.checked)} />
+          Parallel hosts
+        </label>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
           <label style={{ color: '#8890a0', fontSize: '0.75rem' }}>Verbosity</label>
           <select
@@ -377,6 +382,7 @@ export default function Apply() {
           const params = new URLSearchParams()
           if (!ansibleDiff) params.set('diff', 'false')
           if (ansibleVerbosity > 0) params.set('verbosity', String(ansibleVerbosity))
+          if (ansibleFreeStrategy && section.key === 'containers') params.set('free_strategy', 'true')
           if (isRoles && selectedRoles.size < availableRoles.length) {
             Array.from(selectedRoles).forEach(r => params.append('roles', r))
           }

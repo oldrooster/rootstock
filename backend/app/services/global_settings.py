@@ -16,12 +16,18 @@ class S3SyncConfig(BaseModel):
     prefix: str = ""              # S3 key prefix, e.g. "backups/"
 
 
+class StatsConfig(BaseModel):
+    enabled: bool = True
+    interval_seconds: int = 60   # poll interval (minimum 10s)
+
+
 class GlobalSettings(BaseModel):
     docker_vols_base: str = "/var/docker_vols"
     backup_target: str = "/mnt/share/backups"
     backup_schedule: str = ""
     role_order: list[str] = []
     s3_sync: S3SyncConfig = S3SyncConfig()
+    stats: StatsConfig = StatsConfig()
 
 
 def _path(repo_path: str) -> Path:

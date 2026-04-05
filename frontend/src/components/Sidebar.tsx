@@ -32,6 +32,7 @@ const NAV: NavEntry[] = [
       { to: '/roles', label: 'Roles' },
     ],
   },
+  { to: '/stats', label: 'Stats' },
   { to: '/dns', label: 'DNS' },
   { to: '/ingress', label: 'Ingress' },
   { to: '/backups', label: 'Backups' },

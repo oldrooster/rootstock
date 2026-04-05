@@ -100,6 +100,7 @@ def prepare_ansible_workspace(
     filter_roles: set[str] | None = None,
     filter_containers: set[str] | None = None,
     filter_hosts: set[str] | None = None,
+    free_strategy: bool = False,
 ) -> None:
     """Prepare Ansible workspace files for the given scope."""
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -128,7 +129,7 @@ def prepare_ansible_workspace(
         ctr_list = containers or []
         if filter_containers:
             ctr_list = [c for c in ctr_list if c.name in filter_containers]
-        _write_containers_playbook(workspace_dir, repo_path, ctr_list, nodes, vms, secret_store)
+        _write_containers_playbook(workspace_dir, repo_path, ctr_list, nodes, vms, secret_store, free_strategy=free_strategy)
     elif scope == "dns":
         _write_dns_playbook(workspace_dir, repo_path, containers or [], nodes, vms)
     elif scope == "ingress":
@@ -204,6 +205,7 @@ def _write_containers_playbook(
     nodes: list[NodeDefinition],
     vms: list[VMDefinition],
     secret_store: SecretStore | None = None,
+    free_strategy: bool = False,
 ) -> None:
     """Generate playbook + compose + .env files for deploying containers per host."""
     files_dir = workspace_dir / "files" / "compose"
@@ -393,10 +395,11 @@ def _write_containers_playbook(
     )
 
     host_list = ",".join(sorted(all_hosts)) if all_hosts else "localhost"
+    strategy_line = "  strategy: free\n" if free_strategy else ""
     content = (
         f"- name: Deploy containers\n"
         f"  hosts: {host_list}\n"
-        f"  strategy: free\n"  # run each host independently — pulls happen in parallel
+        f"{strategy_line}"
         f"  become: true\n"
         f"  tasks:\n" + "\n".join(tasks)
     )

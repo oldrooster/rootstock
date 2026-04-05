@@ -219,6 +219,7 @@ async def ansible_run(
     hosts_filter: list[str] = Query(default=None, alias="hosts"),
     diff: bool = Query(default=True),
     verbosity: int = Query(default=0, ge=0, le=4),
+    free_strategy: bool = Query(default=False),
     vm_store: VMStore = Depends(get_vm_store),
     node_store: NodeStore = Depends(get_node_store),
     container_store: ContainerStore = Depends(get_container_store),
@@ -252,6 +253,7 @@ async def ansible_run(
         filter_roles=filter_roles,
         filter_containers=filter_containers,
         filter_hosts=filter_hosts,
+        free_strategy=free_strategy if scope == "containers" else False,
     )
 
     async def stream():

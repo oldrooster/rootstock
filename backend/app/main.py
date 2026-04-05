@@ -5,16 +5,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routers import apply, backups, containers, dashboard, dns, git, health, hosts, images, ingress, nodes, roles, secrets, services, settings_router, templates, terminal, vms
+from app.routers import apply, backups, containers, dashboard, dns, git, health, hosts, images, ingress, nodes, roles, secrets, services, settings_router, stats, templates, terminal, vms
 from app.routers import auth_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.services.git_service import GitService
+    from app.services import stats_collector
 
+    from app.services.global_settings import get_global_settings
     GitService(settings.homelab_repo_path).ensure_initialized()
+    gs = get_global_settings(settings.homelab_repo_path)
+    if gs.stats.enabled:
+        stats_collector.start(settings.homelab_repo_path, gs.stats.interval_seconds)
     yield
+    stats_collector.stop()
 
 
 app = FastAPI(
@@ -83,3 +89,4 @@ app.include_router(images.router, prefix="/images", tags=["images"])
 app.include_router(templates.router, prefix="/templates", tags=["templates"])
 app.include_router(roles.router, prefix="/roles", tags=["roles"])
 app.include_router(terminal.router, prefix="/terminal", tags=["terminal"])
+app.include_router(stats.router, prefix="/stats", tags=["stats"])

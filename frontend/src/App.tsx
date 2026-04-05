@@ -15,6 +15,7 @@ import Templates from './pages/Templates'
 import Roles from './pages/Roles'
 import Secrets from './pages/Secrets'
 import Settings from './pages/Settings'
+import Stats from './pages/Stats'
 import { isAuthenticated } from './lib/api'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -52,6 +53,7 @@ export default function App() {
           <Route path="git" element={<Git />} />
           {/* Apply is rendered persistently in Layout, not here */}
           <Route path="apply" element={null} />
+          <Route path="stats" element={<Stats />} />
           <Route path="secrets" element={<Secrets />} />
           <Route path="settings" element={<Settings />} />
         </Route>
