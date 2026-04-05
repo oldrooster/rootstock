@@ -217,6 +217,8 @@ async def ansible_run(
     roles: list[str] = Query(default=None),
     containers_filter: list[str] = Query(default=None, alias="containers"),
     hosts_filter: list[str] = Query(default=None, alias="hosts"),
+    diff: bool = Query(default=True),
+    verbosity: int = Query(default=0, ge=0, le=4),
     vm_store: VMStore = Depends(get_vm_store),
     node_store: NodeStore = Depends(get_node_store),
     container_store: ContainerStore = Depends(get_container_store),
@@ -256,7 +258,7 @@ async def ansible_run(
         yield f"--- Preparing Ansible workspace ({scope}) ---\n"
         yield f"Workspace: {ansible_dir}\n\n"
 
-        async for line in run_ansible("playbook.yml", "inventory.yml", ansible_dir):
+        async for line in run_ansible("playbook.yml", "inventory.yml", ansible_dir, diff=diff, verbosity=verbosity):
             yield line
 
         mark_applied(settings.homelab_repo_path, scope)

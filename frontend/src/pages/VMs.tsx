@@ -947,6 +947,9 @@ export default function VMs() {
                       onClick={() => powerAction(vm.name, 'stop')}
                     >Stop</button>
                     <button style={btnSecondary} onClick={() => {
+                      if (editingName !== null && editingName !== vm.name) {
+                        if (!window.confirm('You have unsaved changes. Discard and edit this VM instead?')) return
+                      }
                       setEditingName(vm.name)
                       setEditForm(vmToForm(vm))
                     }}>Edit</button>
@@ -973,8 +976,15 @@ export default function VMs() {
               Source: {migrateDialog.sourceNode} &mdash; uses vzdump + transfer + qmrestore
             </p>
 
+            {/* Connecting state */}
+            {migrateRunning && migrateSteps.length === 0 && (
+              <div style={{ color: '#8890a0', fontSize: '0.85rem', padding: '0.5rem 0' }}>
+                Connecting to migration service...
+              </div>
+            )}
+
             {/* Config (only before migration starts) */}
-            {migrateSteps.length === 0 && (
+            {!migrateRunning && migrateSteps.length === 0 && (
               <>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
                   <div>

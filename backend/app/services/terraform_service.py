@@ -108,6 +108,10 @@ def generate_main_tf(
             lines.extend(_provider_block(hv, alias, use_aliases))
 
     hv_alias_map = {hv.name: hv.name.replace("-", "_") for hv in enabled_hvs}
+    # Map rootstock node name → Proxmox node_name (what the API/provider actually expects)
+    pve_node_map = {hv.name: hv.node_name or hv.name for hv in enabled_hvs}
+    # Map rootstock node name → snippets-capable storage for that node
+    snippets_map = {hv.name: hv.snippets_storage or "local" for hv in enabled_hvs}
 
     # Deduplicate image downloads: one resource per (node, image_filename)
     # Collect which images are needed on which nodes
@@ -150,7 +154,7 @@ def generate_main_tf(
         lines.extend([
             '  content_type   = "iso"',
             '  datastore_id   = "local"',
-            f'  node_name      = "{node}"',
+            f'  node_name      = "{pve_node_map.get(node, node)}"',
             f'  file_name      = "{dl_file_name}"',
             f'  url            = var.image_url_{res_name}',
             '  overwrite      = false',
@@ -196,7 +200,7 @@ def generate_main_tf(
 
         lines.extend([
             f'  name      = "{vm.name}"',
-            f'  node_name = "{vm.node}"',
+            f'  node_name = "{pve_node_map.get(vm.node, vm.node)}"',
             '  machine   = "q35"',
         ])
         lines.extend([
@@ -292,8 +296,8 @@ def generate_main_tf(
             lines.append(f'  provider     = proxmox.{hv_alias_map[vm.node]}')
         lines.extend([
             '  content_type = "snippets"',
-            '  datastore_id = "local"',
-            f'  node_name    = "{vm.node}"',
+            f'  datastore_id = "{snippets_map.get(vm.node, "local")}"',
+            f'  node_name    = "{pve_node_map.get(vm.node, vm.node)}"',
             '',
             '  source_raw {',
             f'    file_name = "{vm.name}-vendor-config.yaml"',

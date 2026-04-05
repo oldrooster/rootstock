@@ -14,6 +14,7 @@ interface Node {
   ssh_user: string
   roles: string[]
   enabled: boolean
+  snippets_storage: string
 }
 
 const NODE_TYPES = ['proxmox', 'bare-metal']
@@ -74,13 +75,14 @@ interface FormData {
   username: string
   token_name: string
   ssh_user: string
+  snippets_storage: string
   roles: string
   enabled: boolean
 }
 
 const emptyForm: FormData = {
   name: '', type: 'proxmox', endpoint: '', node_name: '', username: 'root@pam',
-  token_name: '', ssh_user: 'root', roles: '', enabled: true,
+  token_name: '', ssh_user: 'root', snippets_storage: 'local', roles: '', enabled: true,
 }
 
 function nodeToForm(n: Node): FormData {
@@ -92,6 +94,7 @@ function nodeToForm(n: Node): FormData {
     username: n.username,
     token_name: n.token_name,
     ssh_user: n.ssh_user || 'root',
+    snippets_storage: n.snippets_storage || 'local',
     roles: (n.roles || []).join(', '),
     enabled: n.enabled,
   }
@@ -106,6 +109,7 @@ function formToPayload(f: FormData) {
     username: f.username,
     token_name: f.token_name,
     ssh_user: f.ssh_user,
+    snippets_storage: f.snippets_storage,
     roles: f.roles.split(',').map(s => s.trim()).filter(Boolean),
     enabled: f.enabled,
   }
@@ -196,7 +200,7 @@ function NodeForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName,
       </div>
 
       {isProxmox && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
           <div>
             <label style={labelStyle}>Username</label>
             <input style={inputStyle} value={form.username}
@@ -206,6 +210,11 @@ function NodeForm({ form, setForm, onSubmit, onCancel, submitLabel, disableName,
             <label style={labelStyle}>API Token Name</label>
             <input style={inputStyle} value={form.token_name}
               onChange={e => set('token_name', e.target.value)} placeholder="rootstock" />
+          </div>
+          <div>
+            <label style={labelStyle}>Snippets Storage</label>
+            <input style={inputStyle} value={form.snippets_storage}
+              onChange={e => set('snippets_storage', e.target.value)} placeholder="local" />
           </div>
         </div>
       )}

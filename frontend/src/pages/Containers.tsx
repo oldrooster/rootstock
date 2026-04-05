@@ -1558,6 +1558,9 @@ export default function Containers() {
                       </div>
                     )}
                     <button style={btnSecondary} onClick={() => {
+                      if (editingName !== null && editingName !== ctr.name) {
+                        if (!window.confirm('You have unsaved changes. Discard and edit this container instead?')) return
+                      }
                       setEditingName(ctr.name)
                       setEditForm(containerToForm(ctr))
                     }}>Edit</button>

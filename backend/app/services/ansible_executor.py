@@ -396,6 +396,7 @@ def _write_containers_playbook(
     content = (
         f"- name: Deploy containers\n"
         f"  hosts: {host_list}\n"
+        f"  strategy: free\n"  # run each host independently — pulls happen in parallel
         f"  become: true\n"
         f"  tasks:\n" + "\n".join(tasks)
     )
@@ -871,14 +872,19 @@ async def run_ansible(
     playbook: str,
     inventory: str,
     working_dir: Path,
+    diff: bool = True,
+    verbosity: int = 0,
 ) -> AsyncGenerator[str, None]:
     """Run ansible-playbook and yield output lines as they arrive."""
     cmd = [
         "ansible-playbook",
         playbook,
         "-i", inventory,
-        "--diff",
     ]
+    if diff:
+        cmd.append("--diff")
+    if verbosity > 0:
+        cmd.append(f"-{'v' * min(verbosity, 4)}")
     logger.info("Running: %s in %s", " ".join(cmd), working_dir)
 
     yield f"$ {' '.join(cmd)}\n"

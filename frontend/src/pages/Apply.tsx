@@ -185,6 +185,10 @@ export default function Apply() {
   const [selectedIngressHosts, setSelectedIngressHosts] = useState<Set<string>>(new Set())
   const [ingressExpanded, setIngressExpanded] = useState(false)
 
+  // Ansible options
+  const [ansibleDiff, setAnsibleDiff] = useState(true)
+  const [ansibleVerbosity, setAnsibleVerbosity] = useState(0)
+
   const fetchStatus = () => {
     Promise.all([
       fetch('/api/apply/').then(r => r.json()),
@@ -336,6 +340,32 @@ export default function Apply() {
         </div>
       )}
 
+      {/* Ansible options */}
+      <div style={{ ...cardStyle, display: 'flex', alignItems: 'center', gap: '1.25rem', padding: '0.6rem 1rem' }}>
+        <span style={{ color: '#8890a0', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Ansible options</span>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#b0b8d0', fontSize: '0.85rem', cursor: 'pointer' }}>
+          <input type="checkbox" checked={ansibleDiff} onChange={e => setAnsibleDiff(e.target.checked)} />
+          --diff
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <label style={{ color: '#8890a0', fontSize: '0.75rem' }}>Verbosity</label>
+          <select
+            value={ansibleVerbosity}
+            onChange={e => setAnsibleVerbosity(Number(e.target.value))}
+            style={{
+              background: '#0f0f1a', border: '1px solid #2a2a3e', color: '#e0e0e0',
+              borderRadius: '4px', padding: '0.25rem 0.5rem', fontSize: '0.82rem', cursor: 'pointer',
+            }}
+          >
+            <option value={0}>none</option>
+            <option value={1}>-v</option>
+            <option value={2}>-vv</option>
+            <option value={3}>-vvv</option>
+            <option value={4}>-vvvv</option>
+          </select>
+        </div>
+      </div>
+
       {/* Per-section cards */}
       {SECTIONS.map(section => {
         const isRoles = section.key === 'roles'
@@ -344,16 +374,20 @@ export default function Apply() {
         const hasFilter = isRoles || isContainers || isIngress
 
         const buildUrl = () => {
+          const params = new URLSearchParams()
+          if (!ansibleDiff) params.set('diff', 'false')
+          if (ansibleVerbosity > 0) params.set('verbosity', String(ansibleVerbosity))
           if (isRoles && selectedRoles.size < availableRoles.length) {
-            return `/api/apply/ansible/roles?${Array.from(selectedRoles).map(r => `roles=${encodeURIComponent(r)}`).join('&')}`
+            Array.from(selectedRoles).forEach(r => params.append('roles', r))
           }
           if (isContainers && selectedContainers.size < availableContainers.length) {
-            return `/api/apply/ansible/containers?${Array.from(selectedContainers).map(c => `containers=${encodeURIComponent(c)}`).join('&')}`
+            Array.from(selectedContainers).forEach(c => params.append('containers', c))
           }
           if (isIngress && selectedIngressHosts.size < allIngressHosts.length) {
-            return `/api/apply/ansible/ingress?${Array.from(selectedIngressHosts).map(h => `hosts=${encodeURIComponent(h)}`).join('&')}`
+            Array.from(selectedIngressHosts).forEach(h => params.append('hosts', h))
           }
-          return `/api/apply/ansible/${section.key}`
+          const qs = params.toString()
+          return `/api/apply/ansible/${section.key}${qs ? '?' + qs : ''}`
         }
 
         const filterEmpty = (isRoles && selectedRoles.size === 0) || (isContainers && selectedContainers.size === 0) || (isIngress && selectedIngressHosts.size === 0)

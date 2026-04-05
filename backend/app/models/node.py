@@ -11,6 +11,7 @@ class NodeDefinition(BaseModel):
     ssh_user: str = "root"
     roles: list[str] = []
     enabled: bool = True
+    snippets_storage: str = "local"  # storage with snippets content type enabled
 
 
 class NodeCreate(BaseModel):
@@ -23,6 +24,7 @@ class NodeCreate(BaseModel):
     ssh_user: str = "root"
     roles: list[str] = []
     enabled: bool = True
+    snippets_storage: str = "local"
 
 
 class NodeUpdate(BaseModel):
@@ -34,3 +36,4 @@ class NodeUpdate(BaseModel):
     ssh_user: str | None = None
     roles: list[str] | None = None
     enabled: bool | None = None
+    snippets_storage: str | None = None
