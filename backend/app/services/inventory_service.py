@@ -33,6 +33,7 @@ def generate_inventory(
             host_vars: dict[str, str] = {
                 "ansible_host": node.endpoint.split("//")[-1].split(":")[0].split("/")[0],
                 "ansible_user": node.ssh_user or "root",
+                "proxmox_node_name": node.node_name or node.name,
             }
             if ssh_key_files and node.name in ssh_key_files:
                 host_vars["ansible_ssh_private_key_file"] = ssh_key_files[node.name]
