@@ -1,31 +1,22 @@
 services:
-  backend:
+  app:
     build:
-      context: ./backend
+      context: .
     volumes:
       - homelab_repo:/homelab
     env_file:
       - .env
     environment:
       - HOMELAB_REPO_PATH=/homelab
+    ports:
+      - "80:8000"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 10s
-
-  frontend:
-    build:
-      context: ./frontend
-      target: prod
-    ports:
-      - "80:80"
-    depends_on:
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
+      start_period: 30s
 
 volumes:
   homelab_repo:

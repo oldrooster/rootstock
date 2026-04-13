@@ -215,7 +215,6 @@ async def terraform_destroy(
 async def ansible_run(
     scope: str,
     roles: list[str] = Query(default=None),
-    containers_filter: list[str] = Query(default=None, alias="containers"),
     hosts_filter: list[str] = Query(default=None, alias="hosts"),
     diff: bool = Query(default=True),
     verbosity: int = Query(default=0, ge=0, le=4),
@@ -240,10 +239,8 @@ async def ansible_run(
 
     # For roles scope, optionally filter to selected roles
     filter_roles = set(roles) if scope == "roles" and roles else None
-    # For containers scope, optionally filter to selected containers
-    filter_containers = set(containers_filter) if scope == "containers" and containers_filter else None
-    # For ingress scope, optionally filter to selected hosts
-    filter_hosts = set(hosts_filter) if scope == "ingress" and hosts_filter else None
+    # For containers/ingress/backups scopes, optionally filter to selected hosts
+    filter_hosts = set(hosts_filter) if hosts_filter else None
 
     prepare_ansible_workspace(
         ansible_dir, scope, settings.homelab_repo_path,
@@ -251,7 +248,6 @@ async def ansible_run(
         secret_store=secret_store,
         templates=templates,
         filter_roles=filter_roles,
-        filter_containers=filter_containers,
         filter_hosts=filter_hosts,
         free_strategy=free_strategy if scope == "containers" else False,
     )

@@ -1,8 +1,11 @@
 from contextlib import asynccontextmanager
+import os
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routers import apply, backups, containers, dashboard, dns, git, health, hosts, images, ingress, nodes, roles, secrets, services, settings_router, stats, templates, terminal, vms
@@ -37,8 +40,12 @@ app = FastAPI(
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
 
+    # Allow static file requests (non-API paths — served directly)
+    if not path.startswith("/api"):
+        return await call_next(request)
+
     # Always allow CORS preflight, health check, and auth endpoints
-    if request.method == "OPTIONS" or path == "/health" or path.startswith("/auth/"):
+    if request.method == "OPTIONS" or path == "/api/health" or path.startswith("/api/auth/"):
         return await call_next(request)
 
     # Extract token from Authorization header or ?token= query param (for WebSockets)
@@ -70,23 +77,37 @@ app.add_middleware(
 )
 
 
-app.include_router(auth_router.router, prefix="/auth", tags=["auth"])
-app.include_router(health.router)
-app.include_router(containers.router, prefix="/containers", tags=["containers"])
-app.include_router(services.router, prefix="/services", tags=["services"])  # legacy alias
-app.include_router(vms.router, prefix="/vms", tags=["vms"])
-app.include_router(nodes.router, prefix="/nodes", tags=["nodes"])
-app.include_router(git.router, prefix="/git", tags=["git"])
-app.include_router(apply.router, prefix="/apply", tags=["apply"])
-app.include_router(hosts.router, prefix="/hosts", tags=["hosts"])
-app.include_router(backups.router, prefix="/backups", tags=["backups"])
-app.include_router(dns.router, prefix="/dns", tags=["dns"])
-app.include_router(ingress.router, prefix="/ingress", tags=["ingress"])
-app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
-app.include_router(settings_router.router, prefix="/settings", tags=["settings"])
-app.include_router(secrets.router, prefix="/secrets", tags=["secrets"])
-app.include_router(images.router, prefix="/images", tags=["images"])
-app.include_router(templates.router, prefix="/templates", tags=["templates"])
-app.include_router(roles.router, prefix="/roles", tags=["roles"])
-app.include_router(terminal.router, prefix="/terminal", tags=["terminal"])
-app.include_router(stats.router, prefix="/stats", tags=["stats"])
+app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
+app.include_router(health.router, prefix="/api")
+app.include_router(containers.router, prefix="/api/containers", tags=["containers"])
+app.include_router(services.router, prefix="/api/services", tags=["services"])  # legacy alias
+app.include_router(vms.router, prefix="/api/vms", tags=["vms"])
+app.include_router(nodes.router, prefix="/api/nodes", tags=["nodes"])
+app.include_router(git.router, prefix="/api/git", tags=["git"])
+app.include_router(apply.router, prefix="/api/apply", tags=["apply"])
+app.include_router(hosts.router, prefix="/api/hosts", tags=["hosts"])
+app.include_router(backups.router, prefix="/api/backups", tags=["backups"])
+app.include_router(dns.router, prefix="/api/dns", tags=["dns"])
+app.include_router(ingress.router, prefix="/api/ingress", tags=["ingress"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
+app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
+app.include_router(secrets.router, prefix="/api/secrets", tags=["secrets"])
+app.include_router(images.router, prefix="/api/images", tags=["images"])
+app.include_router(templates.router, prefix="/api/templates", tags=["templates"])
+app.include_router(roles.router, prefix="/api/roles", tags=["roles"])
+app.include_router(terminal.router, prefix="/api/terminal", tags=["terminal"])
+app.include_router(stats.router, prefix="/api/stats", tags=["stats"])
+
+# Serve pre-built React frontend (single-container mode).
+# Falls back gracefully when static/ doesn't exist (dev with separate Vite server).
+_static_dir = Path(__file__).parent.parent / "static"
+if _static_dir.exists():
+    app.mount("/assets", StaticFiles(directory=str(_static_dir / "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        # Serve any root-level static file that exists (favicon, logo, etc.)
+        candidate = _static_dir / full_path
+        if candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(_static_dir / "index.html"))

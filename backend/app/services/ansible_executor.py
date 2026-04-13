@@ -98,7 +98,6 @@ def prepare_ansible_workspace(
     secret_store: SecretStore | None = None,
     templates: list[TemplateDefinition] | None = None,
     filter_roles: set[str] | None = None,
-    filter_containers: set[str] | None = None,
     filter_hosts: set[str] | None = None,
     free_strategy: bool = False,
 ) -> None:
@@ -126,10 +125,7 @@ def prepare_ansible_workspace(
         gs = get_global_settings(repo_path)
         _write_roles_playbook(workspace_dir, vms, nodes, filter_roles, gs.role_order)
     elif scope == "containers":
-        ctr_list = containers or []
-        if filter_containers:
-            ctr_list = [c for c in ctr_list if c.name in filter_containers]
-        _write_containers_playbook(workspace_dir, repo_path, ctr_list, nodes, vms, secret_store, free_strategy=free_strategy)
+        _write_containers_playbook(workspace_dir, repo_path, containers or [], nodes, vms, secret_store, filter_hosts=filter_hosts, free_strategy=free_strategy)
     elif scope == "dns":
         _write_dns_playbook(workspace_dir, repo_path, containers or [], nodes, vms)
     elif scope == "ingress":
@@ -205,6 +201,7 @@ def _write_containers_playbook(
     nodes: list[NodeDefinition],
     vms: list[VMDefinition],
     secret_store: SecretStore | None = None,
+    filter_hosts: set[str] | None = None,
     free_strategy: bool = False,
 ) -> None:
     """Generate playbook + compose + .env files for deploying containers per host."""
@@ -221,6 +218,9 @@ def _write_containers_playbook(
             all_hosts.update(ctr.hosts)
             if ctr.network and ctr.network not in PREDEFINED_NETWORKS:
                 all_networks.add(ctr.network)
+
+    if filter_hosts:
+        all_hosts = all_hosts & filter_hosts
 
     has_env_file = False
     for host in sorted(all_hosts):

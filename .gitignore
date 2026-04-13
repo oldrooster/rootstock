@@ -22,3 +22,6 @@ compose.override.yml
 # OS
 .DS_Store
 Thumbs.db
+
+backup.json
+delay_prompt.sh

@@ -15,7 +15,9 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(ls ~/.ssh/id_*.pub)",
-      "Bash(ls ~/.ssh/*.pub)"
+      "Bash(ls ~/.ssh/*.pub)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

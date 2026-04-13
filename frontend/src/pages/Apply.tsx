@@ -176,9 +176,9 @@ export default function Apply() {
   const [selectedRoles, setSelectedRoles] = useState<Set<string>>(new Set())
   const [rolesExpanded, setRolesExpanded] = useState(false)
 
-  // Containers selection
+  // Containers host selection
   const [availableContainers, setAvailableContainers] = useState<ContainerInfo[]>([])
-  const [selectedContainers, setSelectedContainers] = useState<Set<string>>(new Set())
+  const [selectedContainerHosts, setSelectedContainerHosts] = useState<Set<string>>(new Set())
   const [containersExpanded, setContainersExpanded] = useState(false)
 
   // Ingress host selection
@@ -215,13 +215,12 @@ export default function Apply() {
       .then((ctrs: ContainerInfo[]) => {
         const enabled = ctrs.filter(c => c.enabled)
         setAvailableContainers(enabled)
-        setSelectedContainers(new Set(enabled.map(c => c.name)))
-        // Derive ingress hosts from containers with ingress
         const hosts = new Set<string>()
         for (const c of enabled) {
           if (c.hosts) c.hosts.forEach(h => hosts.add(h))
         }
-        setSelectedIngressHosts(hosts)
+        setSelectedContainerHosts(hosts)
+        setSelectedIngressHosts(new Set(hosts))
       })
       .catch(() => {})
   }
@@ -234,8 +233,8 @@ export default function Apply() {
     return () => clearInterval(interval)
   }, [])
 
-  // Derive host -> container names map for ingress display
-  const ingressHostMap = useMemo(() => {
+  // Derive host -> container names map (shared for containers + ingress display)
+  const hostContainerMap = useMemo(() => {
     const map: Record<string, string[]> = {}
     for (const c of availableContainers) {
       for (const h of c.hosts) {
@@ -245,7 +244,8 @@ export default function Apply() {
     }
     return map
   }, [availableContainers])
-  const allIngressHosts = useMemo(() => Object.keys(ingressHostMap).sort(), [ingressHostMap])
+  const allContainerHosts = useMemo(() => Object.keys(hostContainerMap).sort(), [hostContainerMap])
+  const allIngressHosts = allContainerHosts
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -386,8 +386,8 @@ export default function Apply() {
           if (isRoles && selectedRoles.size < availableRoles.length) {
             Array.from(selectedRoles).forEach(r => params.append('roles', r))
           }
-          if (isContainers && selectedContainers.size < availableContainers.length) {
-            Array.from(selectedContainers).forEach(c => params.append('containers', c))
+          if (isContainers && selectedContainerHosts.size < allContainerHosts.length) {
+            Array.from(selectedContainerHosts).forEach(h => params.append('hosts', h))
           }
           if (isIngress && selectedIngressHosts.size < allIngressHosts.length) {
             Array.from(selectedIngressHosts).forEach(h => params.append('hosts', h))
@@ -396,7 +396,7 @@ export default function Apply() {
           return `/api/apply/ansible/${section.key}${qs ? '?' + qs : ''}`
         }
 
-        const filterEmpty = (isRoles && selectedRoles.size === 0) || (isContainers && selectedContainers.size === 0) || (isIngress && selectedIngressHosts.size === 0)
+        const filterEmpty = (isRoles && selectedRoles.size === 0) || (isContainers && selectedContainerHosts.size === 0) || (isIngress && selectedIngressHosts.size === 0)
 
         return (
         <div key={section.key} style={cardStyle}>
@@ -415,7 +415,7 @@ export default function Apply() {
                   {rolesExpanded ? '▾' : '▸'} {selectedRoles.size}/{availableRoles.length} roles
                 </button>
               )}
-              {isContainers && availableContainers.length > 0 && (
+              {isContainers && allContainerHosts.length > 0 && (
                 <button
                   style={{
                     background: 'none', border: 'none', cursor: 'pointer', color: '#8890a0',
@@ -423,7 +423,7 @@ export default function Apply() {
                   }}
                   onClick={() => setContainersExpanded(!containersExpanded)}
                 >
-                  {containersExpanded ? '▾' : '▸'} {selectedContainers.size}/{availableContainers.length} containers
+                  {containersExpanded ? '▾' : '▸'} {selectedContainerHosts.size}/{allContainerHosts.length} hosts
                 </button>
               )}
               {isIngress && allIngressHosts.length > 0 && (
@@ -527,40 +527,40 @@ export default function Apply() {
             </div>
           )}
 
-          {/* Expandable container selector */}
-          {isContainers && containersExpanded && availableContainers.length > 0 && (
+          {/* Expandable container host selector */}
+          {isContainers && containersExpanded && allContainerHosts.length > 0 && (
             <div style={{ marginTop: '0.75rem', padding: '0.5rem 0.75rem', background: '#0f0f1a', borderRadius: '4px', border: '1px solid #2a2a3e' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                <span style={{ color: '#8890a0', fontSize: '0.75rem' }}>Select containers to deploy:</span>
+                <span style={{ color: '#8890a0', fontSize: '0.75rem' }}>Select hosts to deploy containers:</span>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button
                     style={{ background: 'none', border: 'none', color: '#7c9ef8', fontSize: '0.75rem', cursor: 'pointer' }}
-                    onClick={() => setSelectedContainers(new Set(availableContainers.map(c => c.name)))}
+                    onClick={() => setSelectedContainerHosts(new Set(allContainerHosts))}
                   >All</button>
                   <button
                     style={{ background: 'none', border: 'none', color: '#7c9ef8', fontSize: '0.75rem', cursor: 'pointer' }}
-                    onClick={() => setSelectedContainers(new Set())}
+                    onClick={() => setSelectedContainerHosts(new Set())}
                   >None</button>
                 </div>
               </div>
-              {availableContainers.map(ctr => (
-                <label key={ctr.name} style={{
+              {allContainerHosts.map(host => (
+                <label key={host} style={{
                   display: 'flex', alignItems: 'center', gap: '0.5rem',
                   padding: '0.25rem 0', cursor: 'pointer',
                 }}>
                   <input
                     type="checkbox"
-                    checked={selectedContainers.has(ctr.name)}
+                    checked={selectedContainerHosts.has(host)}
                     onChange={e => {
-                      const next = new Set(selectedContainers)
-                      if (e.target.checked) next.add(ctr.name)
-                      else next.delete(ctr.name)
-                      setSelectedContainers(next)
+                      const next = new Set(selectedContainerHosts)
+                      if (e.target.checked) next.add(host)
+                      else next.delete(host)
+                      setSelectedContainerHosts(next)
                     }}
                   />
-                  <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{ctr.name}</span>
-                  {ctr.hosts.length > 0 && (
-                    <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>{ctr.hosts.join(', ')}</span>
+                  <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{host}</span>
+                  {hostContainerMap[host] && (
+                    <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>{hostContainerMap[host].join(', ')}</span>
                   )}
                 </label>
               ))}
@@ -599,8 +599,8 @@ export default function Apply() {
                     }}
                   />
                   <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{host}</span>
-                  {ingressHostMap[host] && (
-                    <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>{ingressHostMap[host].join(', ')}</span>
+                  {hostContainerMap[host] && (
+                    <span style={{ color: '#6b7280', fontSize: '0.75rem' }}>{hostContainerMap[host].join(', ')}</span>
                   )}
                 </label>
               ))}
