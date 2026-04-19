@@ -2,11 +2,14 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from pathlib import Path
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 TOKEN_EXPIRY_SECONDS = 86400 * 7  # 7 days
 
@@ -20,8 +23,8 @@ def _load_auth() -> dict:
     if p.exists():
         try:
             return json.loads(p.read_text())
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to read auth file %s: %s", p, e)
     return {}
 
 

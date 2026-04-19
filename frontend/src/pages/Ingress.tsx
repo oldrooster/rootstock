@@ -37,6 +37,28 @@ interface HostInfo {
   status: string
 }
 
+interface HealthEntry {
+  name: string
+  hostname: string
+  backend: string
+  url: string
+  enabled: boolean
+  source: string
+  status: 'healthy' | 'unhealthy' | 'unreachable' | 'disabled'
+  http_code: number | null
+  latency_ms: number | null
+  error?: string
+}
+
+interface TunnelStatus {
+  id: string
+  name: string
+  status: string
+  connected: boolean
+  connections: number
+  created_at: string
+}
+
 const cardStyle: React.CSSProperties = {
   background: '#1a1a2e',
   borderRadius: '6px',
@@ -109,6 +131,14 @@ export default function Ingress() {
   const cfdLogWsRef = useRef<WebSocket | null>(null)
   const cfdLogEndRef = useRef<HTMLDivElement>(null)
 
+  // Health check
+  const [healthResults, setHealthResults] = useState<HealthEntry[] | null>(null)
+  const [healthLoading, setHealthLoading] = useState(false)
+
+  // Tunnel status
+  const [tunnelStatus, setTunnelStatus] = useState<TunnelStatus[] | null>(null)
+  const [tunnelLoading, setTunnelLoading] = useState(false)
+
   const fetchAll = () => {
     setLoading(true)
     Promise.all([
@@ -129,6 +159,24 @@ export default function Ingress() {
   }
 
   useEffect(() => { fetchAll() }, [])
+
+  const runHealthCheck = () => {
+    setHealthLoading(true)
+    fetch('/api/ingress/health')
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then(data => setHealthResults(data))
+      .catch(e => setError(e.message))
+      .finally(() => setHealthLoading(false))
+  }
+
+  const fetchTunnelStatus = () => {
+    setTunnelLoading(true)
+    fetch('/api/ingress/tunnel-status')
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then(data => setTunnelStatus(data))
+      .catch(e => setError(e.message))
+      .finally(() => setTunnelLoading(false))
+  }
 
   useEffect(() => {
     caddyLogEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -385,6 +433,109 @@ export default function Ingress() {
                     </tr>
                   ))}
                 </Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Service Health Check */}
+      <div style={cardStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+          <h2 style={{ color: '#e0e0e0', fontSize: '1rem', margin: 0 }}>Service Health</h2>
+          <button style={btnSecondary} onClick={runHealthCheck} disabled={healthLoading}>
+            {healthLoading ? 'Checking...' : 'Run Health Check'}
+          </button>
+        </div>
+        {healthResults === null ? (
+          <p style={{ color: '#8890a0', margin: 0, fontSize: '0.85rem' }}>Click "Run Health Check" to probe all upstream backends.</p>
+        ) : healthResults.length === 0 ? (
+          <p style={{ color: '#8890a0', margin: 0, fontSize: '0.85rem' }}>No rules to check.</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #2a2a3e' }}>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Name</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Backend</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Status</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>HTTP</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Latency</th>
+              </tr>
+            </thead>
+            <tbody>
+              {healthResults.map(h => (
+                <tr key={h.name} style={{ borderBottom: '1px solid #1a1a2e' }}>
+                  <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontWeight: 600 }}>{h.name}</td>
+                  <td style={{ color: '#b0b8d0', padding: '0.4rem 0.75rem', fontSize: '0.8rem', fontFamily: 'monospace' }}>{h.backend}</td>
+                  <td style={{ padding: '0.4rem 0.75rem' }}>
+                    <span style={{
+                      fontSize: '0.72rem', padding: '0.15rem 0.5rem', borderRadius: '9999px', fontWeight: 600,
+                      background: h.status === 'healthy' ? '#166534' : h.status === 'disabled' ? '#1f2937' : '#7f1d1d',
+                      color: h.status === 'healthy' ? '#86efac' : h.status === 'disabled' ? '#9ca3af' : '#fca5a5',
+                    }}>
+                      {h.status}
+                    </span>
+                  </td>
+                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>
+                    {h.http_code ?? '—'}
+                  </td>
+                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>
+                    {h.latency_ms != null ? `${h.latency_ms}ms` : '—'}
+                    {h.error && <span style={{ color: '#f87171', fontSize: '0.75rem', marginLeft: '0.4rem' }}>{h.error}</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Cloudflare Tunnel Status */}
+      <div style={cardStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+          <h2 style={{ color: '#e0e0e0', fontSize: '1rem', margin: 0 }}>Cloudflare Tunnels</h2>
+          <button style={btnSecondary} onClick={fetchTunnelStatus} disabled={tunnelLoading}>
+            {tunnelLoading ? 'Loading...' : 'Refresh Status'}
+          </button>
+        </div>
+        {tunnelStatus === null ? (
+          <p style={{ color: '#8890a0', margin: 0, fontSize: '0.85rem' }}>Click "Refresh Status" to fetch tunnel connection status from Cloudflare.</p>
+        ) : tunnelStatus.length === 0 ? (
+          <p style={{ color: '#8890a0', margin: 0, fontSize: '0.85rem' }}>No rootstock-managed tunnels found. Requires Cloudflare API token in settings.</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #2a2a3e' }}>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Name</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Status</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Connected</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Connections</th>
+                <th style={{ textAlign: 'left', color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.7rem', textTransform: 'uppercase' }}>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tunnelStatus.map(t => (
+                <tr key={t.id} style={{ borderBottom: '1px solid #1a1a2e' }}>
+                  <td style={{ color: '#e0e0e0', padding: '0.4rem 0.75rem', fontSize: '0.85rem', fontWeight: 600 }}>{t.name}</td>
+                  <td style={{ padding: '0.4rem 0.75rem' }}>
+                    <span style={{
+                      fontSize: '0.72rem', padding: '0.15rem 0.5rem', borderRadius: '9999px',
+                      background: t.status === 'active' ? 'rgba(124,158,248,0.15)' : 'rgba(136,144,160,0.15)',
+                      color: t.status === 'active' ? '#7c9ef8' : '#8890a0',
+                    }}>{t.status}</span>
+                  </td>
+                  <td style={{ padding: '0.4rem 0.75rem' }}>
+                    <span style={{
+                      fontSize: '0.72rem', padding: '0.15rem 0.5rem', borderRadius: '9999px', fontWeight: 600,
+                      background: t.connected ? '#166534' : '#7f1d1d',
+                      color: t.connected ? '#86efac' : '#fca5a5',
+                    }}>{t.connected ? 'yes' : 'no'}</span>
+                  </td>
+                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>{t.connections}</td>
+                  <td style={{ color: '#8890a0', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>
+                    {t.created_at ? new Date(t.created_at).toLocaleDateString() : '—'}
+                  </td>
+                </tr>
               ))}
             </tbody>
           </table>

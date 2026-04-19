@@ -1,8 +1,15 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.models.common import _validate_name
 
 
 class NodeDefinition(BaseModel):
     name: str
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_valid(cls, v: str) -> str:
+        return _validate_name(v)
     type: str = "proxmox"
     endpoint: str = ""
     node_name: str = ""
@@ -17,6 +24,12 @@ class NodeDefinition(BaseModel):
 class NodeCreate(BaseModel):
     name: str
     type: str = "proxmox"
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_valid(cls, v: str) -> str:
+        return _validate_name(v)
+
     endpoint: str = ""
     node_name: str = ""
     username: str = "root@pam"

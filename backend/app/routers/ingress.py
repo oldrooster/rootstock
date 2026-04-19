@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
@@ -17,6 +19,8 @@ from app.services.ingress_service import (
     save_settings,
 )
 from app.services.node_store import NodeStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -38,6 +42,11 @@ def get_container_store() -> ContainerStore:
 
 def get_node_store() -> NodeStore:
     return NodeStore(settings.homelab_repo_path)
+
+
+def get_secret_store():
+    from app.services.secret_store import SecretStore
+    return SecretStore(settings.homelab_repo_path)
 
 
 def _all_rules(
@@ -168,6 +177,130 @@ async def preview_tunnel_config(
     manual_rules = get_manual_rules(settings.homelab_repo_path)
     content = generate_tunnel_config(host, containers, manual_rules)
     return {"content": content}
+
+
+# --- Ingress service health checks ---
+
+
+@router.get("/health")
+async def ingress_health_check(
+    store: ContainerStore = Depends(get_container_store),
+) -> list[dict]:
+    """Check HTTP reachability of each configured upstream backend.
+
+    Returns a list of {name, hostname, backend, status, http_code, latency_ms}.
+    """
+    rules = _all_rules(store)
+    results: list[dict] = []
+
+    async def check_rule(rule: IngressRule):
+        # Derive the URL to probe
+        backend = rule.backend
+        scheme = "https" if rule.ingress_mode == "caddy" else "http"
+        if "://" not in backend:
+            # backend is "container:port" or just "container"
+            parts = backend.split(":")
+            host = parts[0]
+            port = parts[1] if len(parts) > 1 else ("443" if scheme == "https" else "80")
+            url = f"{scheme}://{host}:{port}/"
+        else:
+            url = backend
+
+        entry: dict = {
+            "name": rule.name,
+            "hostname": rule.hostname,
+            "backend": rule.backend,
+            "url": url,
+            "enabled": rule.enabled,
+            "source": rule.source,
+        }
+
+        if not rule.enabled:
+            entry.update({"status": "disabled", "http_code": None, "latency_ms": None})
+            results.append(entry)
+            return
+
+        import time
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=5, verify=False) as client:
+                resp = await client.get(url, follow_redirects=True)
+            latency = round((time.monotonic() - t0) * 1000)
+            ok = resp.status_code < 500
+            entry.update({
+                "status": "healthy" if ok else "unhealthy",
+                "http_code": resp.status_code,
+                "latency_ms": latency,
+            })
+        except Exception as exc:
+            entry.update({
+                "status": "unreachable",
+                "http_code": None,
+                "latency_ms": None,
+                "error": str(exc)[:120],
+            })
+        results.append(entry)
+
+    await asyncio.gather(*(check_rule(r) for r in rules))
+    return sorted(results, key=lambda r: r["name"])
+
+
+# --- Cloudflare tunnel status ---
+
+
+@router.get("/tunnel-status")
+async def tunnel_status(secret_store=Depends(get_secret_store)) -> list[dict]:
+    """Return status of all Cloudflare tunnels via the Cloudflare API."""
+    ingress_settings = get_settings(settings.homelab_repo_path)
+
+    cf_token = ""
+    if ingress_settings.cloudflare_api_token_secret:
+        try:
+            cf_token = secret_store.get(ingress_settings.cloudflare_api_token_secret)
+        except Exception:
+            pass
+
+    if not cf_token:
+        return []
+
+    try:
+        from app.services.cloudflare_service import get_account_id, list_tunnels
+        account_id = ingress_settings.cloudflare_account_id or get_account_id(cf_token)
+        raw_tunnels = list_tunnels(cf_token, account_id)
+
+        # Filter to rootstock-managed tunnels and enrich with connections info
+        result: list[dict] = []
+        headers = {"Authorization": f"Bearer {cf_token}"}
+        async with httpx.AsyncClient(timeout=10) as client:
+            for tunnel in raw_tunnels:
+                if not tunnel.get("name", "").startswith("rootstock-"):
+                    continue
+                tid = tunnel["id"]
+                # Fetch connection status
+                try:
+                    r = await client.get(
+                        f"https://api.cloudflare.com/client/v4/accounts/{account_id}/cfd_tunnel/{tid}/connections",
+                        headers=headers,
+                    )
+                    conn_data = r.json().get("result", [])
+                    connected = len(conn_data) > 0
+                    conns = len(conn_data)
+                except Exception:
+                    connected = False
+                    conns = 0
+
+                result.append({
+                    "id": tid,
+                    "name": tunnel.get("name"),
+                    "status": tunnel.get("status", "unknown"),
+                    "connected": connected,
+                    "connections": conns,
+                    "created_at": tunnel.get("created_at"),
+                })
+        return result
+    except Exception as e:
+        logger.warning("Could not fetch tunnel status: %s", e)
+        return []
 
 
 # --- Caddy container management (restart / logs) ---

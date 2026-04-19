@@ -945,11 +945,17 @@ export default function Containers() {
   // Log viewer state
   const [logInfo, setLogInfo] = useState<{ name: string; host: string } | null>(null)
   const [logLines, setLogLines] = useState<string[]>([])
+  const [logSearch, setLogSearch] = useState('')
+  const [logFollow, setLogFollow] = useState(true)
   const logWsRef = useRef<WebSocket | null>(null)
   const logEndRef = useRef<HTMLDivElement>(null)
 
   // Host filter
   const [hostFilter, setHostFilter] = useState<string | null>(null)
+
+  // Bulk selection
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkLoading, setBulkLoading] = useState(false)
 
   // Migration state
   interface MigrateStep { step: string; status: string; detail: string }
@@ -1001,10 +1007,10 @@ export default function Containers() {
 
   useEffect(() => { loadAll(); loadStatus() }, [])
 
-  // Auto-scroll log viewer
+  // Auto-scroll log viewer when following
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [logLines])
+    if (logFollow) logEndRef.current?.scrollIntoView({ behavior: 'auto' })
+  }, [logLines, logFollow])
 
   // Close context menu on outside click
   useEffect(() => {
@@ -1040,6 +1046,8 @@ export default function Containers() {
     // Close any existing log connection
     if (logWsRef.current) { logWsRef.current.close(); logWsRef.current = null }
     setLogLines([])
+    setLogSearch('')
+    setLogFollow(true)
     setLogInfo({ name, host })
 
     const ws = new WebSocket(
@@ -1259,6 +1267,38 @@ export default function Containers() {
     } catch (e) { setError((e as Error).message) }
   }
 
+  async function bulkSetEnabled(enabled: boolean) {
+    setBulkLoading(true)
+    try {
+      for (const name of selected) {
+        const ctr = containers.find(c => c.name === name)
+        if (!ctr) continue
+        const payload = { enabled }
+        await fetch(`/api/containers/${encodeURIComponent(name)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+      }
+      setSelected(new Set())
+      loadAll()
+    } catch (e) { setError((e as Error).message) }
+    finally { setBulkLoading(false) }
+  }
+
+  async function bulkDelete() {
+    if (!window.confirm(`Delete ${selected.size} container(s)?`)) return
+    setBulkLoading(true)
+    try {
+      for (const name of selected) {
+        await fetch(`/api/containers/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      }
+      setSelected(new Set())
+      loadAll()
+    } catch (e) { setError((e as Error).message) }
+    finally { setBulkLoading(false) }
+  }
+
   async function showCompose(host: string) {
     try {
       const r = await fetch(`/api/containers/compose/${encodeURIComponent(host)}`)
@@ -1315,6 +1355,36 @@ export default function Containers() {
         <div style={{ background: '#7f1d1d', color: '#fca5a5', padding: '0.5rem 0.75rem', borderRadius: '4px', marginBottom: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{error}</span>
           <button style={{ ...btnSecondary, border: 'none', color: '#fca5a5' }} onClick={() => setError(null)}>dismiss</button>
+        </div>
+      )}
+
+      {/* Bulk action toolbar */}
+      {selected.size > 0 && (
+        <div style={{
+          background: '#1a1a2e', border: '1px solid #7c9ef8', borderRadius: '6px',
+          padding: '0.5rem 0.75rem', marginBottom: '0.75rem',
+          display: 'flex', alignItems: 'center', gap: '0.75rem',
+        }}>
+          <span style={{ color: '#7c9ef8', fontSize: '0.85rem', fontWeight: 600 }}>{selected.size} selected</span>
+          <button
+            style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.25rem 0.6rem', borderColor: '#22c55e', color: '#22c55e' }}
+            disabled={bulkLoading}
+            onClick={() => bulkSetEnabled(true)}
+          >Enable</button>
+          <button
+            style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.25rem 0.6rem', borderColor: '#f59e0b', color: '#f59e0b' }}
+            disabled={bulkLoading}
+            onClick={() => bulkSetEnabled(false)}
+          >Disable</button>
+          <button
+            style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.25rem 0.6rem', borderColor: '#ef4444', color: '#ef4444' }}
+            disabled={bulkLoading}
+            onClick={bulkDelete}
+          >Delete</button>
+          <button
+            style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.25rem 0.6rem' }}
+            onClick={() => setSelected(new Set())}
+          >Clear</button>
         </div>
       )}
 
@@ -1396,7 +1466,7 @@ export default function Containers() {
       )}
 
       {containers.filter(ctr => !hostFilter || ctr.hosts.includes(hostFilter)).map(ctr => (
-        <div key={ctr.name} style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', marginBottom: '0.75rem' }}>
+        <div key={ctr.name} style={{ background: '#1a1a2e', borderRadius: '6px', padding: '1rem', marginBottom: '0.75rem', outline: selected.has(ctr.name) ? '1px solid #7c9ef8' : 'none' }}>
           {editingName === ctr.name ? (
             <ContainerForm
               form={editForm}
@@ -1410,6 +1480,18 @@ export default function Containers() {
             />
           ) : (
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              {/* Checkbox */}
+              <input
+                type="checkbox"
+                checked={selected.has(ctr.name)}
+                onChange={e => {
+                  const next = new Set(selected)
+                  if (e.target.checked) next.add(ctr.name)
+                  else next.delete(ctr.name)
+                  setSelected(next)
+                }}
+                style={{ marginTop: '0.3rem', marginRight: '0.5rem', flexShrink: 0, cursor: 'pointer' }}
+              />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem', flexWrap: 'wrap' }}>
                   <span style={{ color: '#e0e0e0', fontWeight: 600, fontSize: '1rem' }}>{ctr.name}</span>
@@ -1557,6 +1639,15 @@ export default function Containers() {
                         </button>
                       </div>
                     )}
+                    <button style={{ ...btnSecondary, fontSize: '0.82rem' }} onClick={async () => {
+                      const newName = window.prompt(`Clone "${ctr.name}" as:`, `${ctr.name}-copy`)
+                      if (!newName) return
+                      try {
+                        const r = await fetch(`/api/containers/${encodeURIComponent(ctr.name)}/clone?new_name=${encodeURIComponent(newName)}`, { method: 'POST' })
+                        if (!r.ok) { const d = await r.json().catch(() => null); throw new Error(d?.detail || `HTTP ${r.status}`) }
+                        loadAll()
+                      } catch (e) { setError((e as Error).message) }
+                    }}>Clone</button>
                     <button style={btnSecondary} onClick={() => {
                       if (editingName !== null && editingName !== ctr.name) {
                         if (!window.confirm('You have unsaved changes. Discard and edit this container instead?')) return
@@ -1642,21 +1733,58 @@ export default function Containers() {
       {logInfo && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
-          background: 'rgba(0,0,0,0.8)',
+          background: 'rgba(0,0,0,0.85)',
           display: 'flex', flexDirection: 'column',
         }}>
           <div style={{
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
             padding: '0.5rem 1rem', background: '#1a1a2e', borderBottom: '1px solid #2a2a3e',
+            gap: '0.75rem', flexWrap: 'wrap',
           }}>
             <span style={{ color: '#e0e0e0', fontSize: '0.9rem', fontWeight: 600 }}>
               Logs: {logInfo.name} ({logInfo.host})
             </span>
-            <button onClick={closeLogs} style={{
-              background: 'transparent', border: '1px solid #2a2a3e', color: '#b0b8d0',
-              borderRadius: '4px', padding: '0.25rem 0.75rem', cursor: 'pointer', fontSize: '0.85rem',
-            }}>Close</button>
+            {/* Search */}
+            <input
+              value={logSearch}
+              onChange={e => setLogSearch(e.target.value)}
+              placeholder="Filter logs..."
+              style={{
+                flex: '1 1 200px', maxWidth: '320px',
+                background: '#0f0f1a', border: '1px solid #2a2a3e', borderRadius: '4px',
+                color: '#e0e0e0', padding: '0.3rem 0.6rem', fontSize: '0.82rem',
+              }}
+            />
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: '#8890a0', fontSize: '0.82rem', cursor: 'pointer' }}>
+                <input type="checkbox" checked={logFollow} onChange={e => setLogFollow(e.target.checked)} />
+                Follow
+              </label>
+              <button
+                onClick={() => {
+                  const content = logLines.join('\n')
+                  const blob = new Blob([content], { type: 'text/plain' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url; a.download = `${logInfo.name}-${logInfo.host}.log`
+                  a.click(); URL.revokeObjectURL(url)
+                }}
+                style={{
+                  background: 'transparent', border: '1px solid #2a2a3e', color: '#b0b8d0',
+                  borderRadius: '4px', padding: '0.25rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem',
+                }}
+              >Download</button>
+              <button onClick={closeLogs} style={{
+                background: 'transparent', border: '1px solid #2a2a3e', color: '#b0b8d0',
+                borderRadius: '4px', padding: '0.25rem 0.75rem', cursor: 'pointer', fontSize: '0.85rem',
+              }}>Close</button>
+            </div>
           </div>
+          {logSearch && (
+            <div style={{ background: '#1a1a2e', padding: '0.25rem 1rem', fontSize: '0.75rem', color: '#8890a0', borderBottom: '1px solid #2a2a3e' }}>
+              {logLines.filter(l => l.toLowerCase().includes(logSearch.toLowerCase())).length} matching lines
+            </div>
+          )}
           <div style={{
             flex: 1, overflow: 'auto', padding: '0.75rem 1rem',
             background: '#0f0f1a',
@@ -1668,9 +1796,25 @@ export default function Containers() {
             }}>
               {logLines.length === 0
                 ? <span style={{ color: '#6b7280' }}>Connecting...</span>
-                : logLines.map((line, i) => (
-                    <div key={i} style={{ padding: '1px 0' }}>{line || '\u00a0'}</div>
-                  ))
+                : (() => {
+                    const filtered = logSearch
+                      ? logLines.filter(l => l.toLowerCase().includes(logSearch.toLowerCase()))
+                      : logLines
+                    const query = logSearch.toLowerCase()
+                    return filtered.map((line, i) => {
+                      if (!logSearch) return <div key={i} style={{ padding: '1px 0' }}>{line || '\u00a0'}</div>
+                      // Highlight match
+                      const idx = line.toLowerCase().indexOf(query)
+                      if (idx === -1) return <div key={i} style={{ padding: '1px 0' }}>{line}</div>
+                      return (
+                        <div key={i} style={{ padding: '1px 0' }}>
+                          {line.slice(0, idx)}
+                          <mark style={{ background: '#f59e0b', color: '#0f0f1a' }}>{line.slice(idx, idx + query.length)}</mark>
+                          {line.slice(idx + query.length)}
+                        </div>
+                      )
+                    })
+                  })()
               }
               <div ref={logEndRef} />
             </pre>

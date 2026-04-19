@@ -46,7 +46,7 @@ See [architecture.md](architecture.md) for a detailed breakdown of how the appli
 - **Ingress** -- Caddy reverse proxy with automatic HTTPS via Cloudflare DNS challenge. Per-host Caddyfile generation. Cloudflare Tunnel auto-provisioning for external access.
 - **Backups** -- rsync-based volume backups with snapshot retention. Container-derived and manual backup paths. Backup stats with caching. Full settings export/import.
 - **Secrets** -- Encrypted key-value store for API tokens, SSH keys, and tunnel tokens. SSH key pair generation.
-- **Apply** -- One-click or scoped apply across Terraform, Ansible roles, containers, DNS, and ingress. Real-time streaming output. Dirty-state tracking.
+- **Apply** -- One-click or scoped apply across Terraform, Ansible roles, containers, DNS, and ingress. Real-time streaming output. Dirty-state tracking. Structured plan diff viewer. State snapshot and rollback for Terraform.
 - **Git** -- Every change is committed. Push to a remote for off-site backup.
 - **Terminal** -- Browser-based SSH terminal to any managed host via xterm.js + WebSocket.
 - **Dashboard** -- Overview of hosts, VMs, containers, and recent git activity.
@@ -63,10 +63,12 @@ See [architecture.md](architecture.md) for a detailed breakdown of how the appli
 
 ```bash
 cp .env.example .env
-# Edit .env with your settings:
-#   HOMELAB_REPO_PATH=/homelab
-#   ROOTSTOCK_SECRET_KEY=<your-fernet-key>
-#   HOMELAB_REMOTE_URL=<optional-git-remote>
+# Required:
+#   ROOTSTOCK_SECRET_KEY=<your-fernet-key>   (see .env.example for generate command)
+# Optional:
+#   HOMELAB_REPO_PATH=/homelab               (default)
+#   HOMELAB_REMOTE_URL=<git-remote>
+#   CORS_ORIGINS=http://localhost:5173       (dev only — not needed in production)
 ```
 
 ### Run (production)
@@ -117,6 +119,7 @@ To recover on a new server: deploy fresh, set the same `ROOTSTOCK_SECRET_KEY`, i
 ```
 rootstock/
 ├── compose.yml                 # Docker Compose stack
+├── .env.example                # Required/optional env vars with comments
 ├── architecture.md             # Detailed architecture documentation
 ├── backend/
 │   ├── Dockerfile
@@ -126,7 +129,8 @@ rootstock/
 │       ├── config.py           # Settings (pydantic-settings, env vars)
 │       ├── models/             # Pydantic request/response schemas
 │       ├── routers/            # API route handlers (~17 routers)
-│       └── services/           # Business logic layer (~25 services)
+│       └── services/           # Business logic layer (~30 services)
+├── tests/                      # Integration-level tests (pytest)
 ├── frontend/
 │   ├── Dockerfile              # Multi-stage: dev (Vite) + prod (nginx)
 │   ├── nginx.conf              # Production reverse proxy with WebSocket support

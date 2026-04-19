@@ -458,6 +458,33 @@ async def vm_power_action(
     return {"ok": True, "action": action, "vmid": vmid}
 
 
+@router.post("/{name}/clone", status_code=201)
+async def clone_vm(
+    name: str,
+    new_name: str,
+    store: VMStore = Depends(get_store),
+    git: GitService = Depends(get_git),
+    node_store: NodeStore = Depends(get_node_store),
+) -> VMDefinition:
+    """Duplicate a VM configuration with a new name."""
+    from app.models.common import _validate_name
+    _validate_name(new_name)
+    source = store.get(name)
+    try:
+        store.get(new_name)
+        raise HTTPException(409, f"VM '{new_name}' already exists")
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+    data = source.model_dump()
+    data["name"] = new_name
+    data["provisioned"] = False  # clone starts unprovisioned
+    cloned = VMDefinition(**data)
+    store.write(cloned)
+    git.commit_all(f"[terraform] clone: {name} -> {new_name}")
+    return cloned
+
+
 @router.get("/{name}")
 async def get_vm(
     name: str,

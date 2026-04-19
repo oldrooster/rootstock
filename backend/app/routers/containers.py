@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import logging
+import shlex
 from pathlib import Path
 
 import paramiko
@@ -16,6 +17,7 @@ from app.services.container_store import ContainerStore
 from app.services.git_service import GitService
 from app.services.node_store import NodeStore
 from app.services.secret_store import SecretStore
+from app.services.ssh_service import load_private_key as _load_private_key, ssh_exec as _ssh_exec, open_ssh_client as _open_ssh_client
 from app.services.template_store import TemplateStore
 from app.services.vm_store import VMStore
 
@@ -38,6 +40,14 @@ def get_node_store() -> NodeStore:
 
 def get_vm_store() -> VMStore:
     return VMStore(settings.homelab_repo_path)
+
+
+def get_secret_store() -> SecretStore:
+    return SecretStore(settings.homelab_repo_path)
+
+
+def get_template_store() -> TemplateStore:
+    return TemplateStore(settings.homelab_repo_path)
 
 
 @router.get("/")
@@ -290,6 +300,34 @@ async def import_container(
     return ctr
 
 
+@router.post("/{name}/clone", status_code=201)
+async def clone_container(
+    name: str,
+    new_name: str,
+    store: ContainerStore = Depends(get_store),
+    git: GitService = Depends(get_git),
+) -> ContainerDefinition:
+    """Duplicate a container with a new name (pre-filled form data for editing)."""
+    from app.models.common import _validate_name
+    _validate_name(new_name)
+
+    source = store.get(name)
+    # Check new name doesn't exist
+    try:
+        store.get(new_name)
+        raise HTTPException(409, f"Container '{new_name}' already exists")
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+
+    data = source.model_dump()
+    data["name"] = new_name
+    cloned = ContainerDefinition(**data)
+    store.write(cloned)
+    git.commit_all(f"[container] clone: {name} -> {new_name}")
+    return cloned
+
+
 @router.get("/{name}")
 async def get_container(name: str, store: ContainerStore = Depends(get_store)) -> ContainerDefinition:
     return store.get(name)
@@ -325,12 +363,6 @@ async def delete_container(
 # ---------------------------------------------------------------------------
 # Remote docker actions via SSH
 # ---------------------------------------------------------------------------
-
-def _load_private_key(pem: str) -> paramiko.PKey:
-    try:
-        return paramiko.Ed25519Key.from_private_key(io.StringIO(pem))
-    except Exception:
-        return paramiko.RSAKey.from_private_key(io.StringIO(pem))
 
 
 async def _resolve_host_ssh(host_name: str) -> tuple[str, str, str]:
@@ -391,34 +423,6 @@ async def _resolve_host_ssh(host_name: str) -> tuple[str, str, str]:
     raise HTTPException(404, f"Cannot resolve SSH for host '{host_name}'")
 
 
-def _ssh_exec(host: str, user: str, pem: str, command: str) -> tuple[int, str, str]:
-    """Execute a command over SSH and return (exit_code, stdout, stderr)."""
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    pkey = _load_private_key(pem)
-    try:
-        client.connect(hostname=host, username=user, pkey=pkey, timeout=15,
-                       look_for_keys=False, allow_agent=False)
-        _, stdout, stderr = client.exec_command(command, timeout=30)
-        exit_code = stdout.channel.recv_exit_status()
-        return exit_code, stdout.read().decode(), stderr.read().decode()
-    finally:
-        client.close()
-
-
-async def _open_ssh_client(ip: str, user: str, pem: str) -> paramiko.SSHClient:
-    """Open and return a connected SSH client."""
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    pkey = _load_private_key(pem)
-    await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: client.connect(hostname=ip, username=user, pkey=pkey,
-                               timeout=15, look_for_keys=False, allow_agent=False),
-    )
-    return client
-
-
 ALLOWED_ACTIONS = {"start", "stop", "restart"}
 
 
@@ -427,12 +431,12 @@ async def container_action(
     name: str,
     action: str,
     host: str | None = None,
+    store: ContainerStore = Depends(get_store),
 ) -> dict:
     """Execute a docker action (start/stop/restart) on a container via SSH."""
     if action not in ALLOWED_ACTIONS:
         raise HTTPException(400, f"Invalid action '{action}'. Allowed: {', '.join(ALLOWED_ACTIONS)}")
 
-    store = ContainerStore(settings.homelab_repo_path)
     ctr = store.get(name)
 
     target_host = host or (ctr.hosts[0] if ctr.hosts else None)
@@ -440,7 +444,7 @@ async def container_action(
         raise HTTPException(400, f"Container '{name}' has no hosts assigned")
 
     ip, user, pem = await _resolve_host_ssh(target_host)
-    cmd = f"sudo docker {action} {name}"
+    cmd = f"sudo docker {action} {shlex.quote(name)}"
 
     loop = asyncio.get_event_loop()
     exit_code, stdout, stderr = await loop.run_in_executor(
@@ -454,11 +458,15 @@ async def container_action(
 
 
 @router.websocket("/{name}/logs")
-async def container_logs(websocket: WebSocket, name: str, host: str | None = None):
+async def container_logs(
+    websocket: WebSocket,
+    name: str,
+    host: str | None = None,
+    store: ContainerStore = Depends(get_store),
+):
     """Stream docker logs via SSH WebSocket."""
     await websocket.accept()
 
-    store = ContainerStore(settings.homelab_repo_path)
     try:
         ctr = store.get(name)
     except Exception:
@@ -488,7 +496,7 @@ async def container_logs(websocket: WebSocket, name: str, host: str | None = Non
 
     transport = client.get_transport()
     channel = transport.open_session()
-    channel.exec_command(f"sudo docker logs -f --tail 200 {name}")
+    channel.exec_command(f"sudo docker logs -f --tail 200 {shlex.quote(name)}")
 
     async def read_stream(is_stderr: bool = False):
         loop = asyncio.get_event_loop()
@@ -530,11 +538,15 @@ async def container_logs(websocket: WebSocket, name: str, host: str | None = Non
 
 
 @router.websocket("/{name}/shell")
-async def container_shell(websocket: WebSocket, name: str, host: str | None = None):
+async def container_shell(
+    websocket: WebSocket,
+    name: str,
+    host: str | None = None,
+    store: ContainerStore = Depends(get_store),
+):
     """Interactive shell into a docker container via SSH + docker exec."""
     await websocket.accept()
 
-    store = ContainerStore(settings.homelab_repo_path)
     try:
         ctr = store.get(name)
     except Exception:
@@ -567,8 +579,9 @@ async def container_shell(websocket: WebSocket, name: str, host: str | None = No
     channel = transport.open_session()
     channel.get_pty(term="xterm-256color", width=80, height=24)
     # Try bash first, fall back to sh
+    qname = shlex.quote(name)
     channel.exec_command(
-        f"sudo docker exec -it {name} /bin/bash 2>/dev/null || sudo docker exec -it {name} /bin/sh"
+        f"sudo docker exec -it {qname} /bin/bash 2>/dev/null || sudo docker exec -it {qname} /bin/sh"
     )
 
     await websocket.send_text(f"Attached to container '{name}' on {target_host}\r\n\r\n")
@@ -688,7 +701,7 @@ async def container_migrate(
         # --- 2. Stop source container ---
         await send_step("stop", "running", f"Stopping container on {src}...")
         exit_code, _, stderr = await loop.run_in_executor(
-            None, lambda: _ssh_exec(src_ip, src_user, src_pem, f"sudo docker stop {name}")
+            None, lambda: _ssh_exec(src_ip, src_user, src_pem, f"sudo docker stop {shlex.quote(name)}")
         )
         if exit_code != 0 and "No such container" not in stderr:
             await send_step("stop", "error", f"Failed to stop: {stderr.strip()}")
@@ -712,7 +725,7 @@ async def container_migrate(
                 last_seg = sp.rsplit("/", 1)[-1] if "/" in sp else sp
                 create_path = sp.rsplit("/", 1)[0] if "." in last_seg else sp
                 await loop.run_in_executor(
-                    None, lambda p=create_path: _ssh_exec(dst_ip, dst_user, dst_pem, f"sudo mkdir -p {p}")
+                    None, lambda p=create_path: _ssh_exec(dst_ip, dst_user, dst_pem, f"sudo mkdir -p {shlex.quote(p)}")
                 )
 
         if vol_paths:
@@ -724,7 +737,7 @@ async def container_migrate(
                 # Create parent dir on destination
                 parent = vol_path.rsplit("/", 1)[0] if "/" in vol_path else vol_path
                 exit_code, _, stderr = await loop.run_in_executor(
-                    None, lambda p=parent: _ssh_exec(dst_ip, dst_user, dst_pem, f"sudo mkdir -p {p}")
+                    None, lambda p=parent: _ssh_exec(dst_ip, dst_user, dst_pem, f"sudo mkdir -p {shlex.quote(p)}")
                 )
                 if exit_code != 0:
                     await send_step("volumes", "error", f"Failed to create dir on target: {stderr.strip()}")
@@ -755,11 +768,11 @@ async def container_migrate(
                     # Stream tar from source and pipe to destination
                     src_transport = src_client.get_transport()
                     src_chan = src_transport.open_session()
-                    src_chan.exec_command(f"sudo tar czf - -C / {vol_path.lstrip('/')}")
+                    src_chan.exec_command(f"sudo tar czf - -C / {shlex.quote(vol_path.lstrip('/'))}")
 
                     dst_transport = dst_client.get_transport()
                     dst_chan = dst_transport.open_session()
-                    dst_chan.exec_command(f"sudo tar xzf - -C /")
+                    dst_chan.exec_command("sudo tar xzf - -C /")
 
                     # Relay data
                     total_bytes = 0
@@ -815,7 +828,7 @@ async def container_migrate(
         if ctr.network:
             await loop.run_in_executor(
                 None, lambda: _ssh_exec(dst_ip, dst_user, dst_pem,
-                                        f"sudo docker network create {ctr.network} 2>/dev/null; true")
+                                        f"sudo docker network create {shlex.quote(ctr.network)} 2>/dev/null; true")
             )
 
         # Build from repo if needed
@@ -896,7 +909,7 @@ async def container_migrate(
         # --- 6. Clean up source ---
         await send_step("cleanup", "running", f"Removing container from {src}...")
         await loop.run_in_executor(
-            None, lambda: _ssh_exec(src_ip, src_user, src_pem, f"sudo docker rm -f {name}")
+            None, lambda: _ssh_exec(src_ip, src_user, src_pem, f"sudo docker rm -f {shlex.quote(name)}")
         )
 
         # Re-generate compose + .env on source (without the migrated container)

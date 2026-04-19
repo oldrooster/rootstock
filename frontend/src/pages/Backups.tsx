@@ -201,6 +201,9 @@ export default function Backups() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [backupSettings, setBackupSettings] = useState<BackupSettings>({ backup_target: '', backup_schedule: '' })
+  const [editingSettings, setEditingSettings] = useState(false)
+  const [settingsForm, setSettingsForm] = useState({ target: '', hour: '2', minute: '0', days: new Set<string>(['0', '1', '2', '3', '4', '5', '6']) })
+  const [settingsSaving, setSettingsSaving] = useState(false)
 
   // Manual form
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
@@ -354,10 +357,20 @@ export default function Backups() {
         setPaths(p)
         setManualPaths(m)
         setHosts(h)
-        setBackupSettings({
-          backup_target: s.global_settings?.backup_target || '',
-          backup_schedule: s.global_settings?.backup_schedule || '',
-        })
+        const target = s.global_settings?.backup_target || ''
+        const schedule = s.global_settings?.backup_schedule || ''
+        setBackupSettings({ backup_target: target, backup_schedule: schedule })
+        // Parse schedule into form
+        if (schedule.trim()) {
+          const parts = schedule.trim().split(/\s+/)
+          if (parts.length === 5) {
+            const [min, hour, , , dow] = parts
+            const days = dow === '*' ? new Set(['0','1','2','3','4','5','6']) : new Set<string>(dow.split(',').filter(Boolean))
+            setSettingsForm({ target, hour: hour === '*' ? '2' : hour, minute: min === '*' ? '0' : min, days })
+          }
+        } else {
+          setSettingsForm(f => ({ ...f, target }))
+        }
         if (s.global_settings?.s3_sync) {
           setS3Config(prev => ({ ...prev, ...s.global_settings.s3_sync }))
         }
@@ -646,6 +659,38 @@ export default function Backups() {
       .finally(() => { setPurgeRunning(false); setPurgeConfirm(false) })
   }
 
+  /* ── Global Settings Save ──────────────────────────────── */
+
+  function saveBackupSettings() {
+    const sortedDays = Array.from(settingsForm.days).sort().join(',')
+    const dowPart = settingsForm.days.size === 7 ? '*' : sortedDays
+    const cron = `${settingsForm.minute} ${settingsForm.hour} * * ${dowPart}`
+    setSettingsSaving(true)
+    fetch('/api/settings/')
+      .then(r => r.json())
+      .then(data => {
+        const gs = data.global_settings || {}
+        gs.backup_target = settingsForm.target
+        gs.backup_schedule = cron
+        return fetch('/api/settings/global', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(gs),
+        })
+      })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then(() => {
+        const sortedDows = Array.from(settingsForm.days).sort().join(',')
+        setBackupSettings({
+          backup_target: settingsForm.target,
+          backup_schedule: `${settingsForm.minute} ${settingsForm.hour} * * ${settingsForm.days.size === 7 ? '*' : sortedDows}`,
+        })
+        setEditingSettings(false)
+      })
+      .catch(e => setError(e.message))
+      .finally(() => setSettingsSaving(false))
+  }
+
   /* ── S3 Config ─────────────────────────────────────────── */
 
   function saveS3Config() {
@@ -708,32 +753,126 @@ export default function Backups() {
         </div>
       )}
 
-      {/* Settings summary */}
-      <div style={{ ...cardStyle, display: 'flex', gap: '2rem', alignItems: 'center', padding: '0.75rem 1.25rem', flexWrap: 'wrap' }}>
-        <div>
-          <span style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase' }}>Target: </span>
-          <span style={{ color: '#e0e0e0', fontSize: '0.85rem', fontFamily: 'monospace' }}>
-            {backupSettings.backup_target || <span style={{ color: '#f87171' }}>not configured</span>}
-          </span>
+      {/* Settings card */}
+      <div style={cardStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: editingSettings ? '0.75rem' : 0 }}>
+          <div style={{ display: 'flex', gap: '2rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <div>
+              <span style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase' }}>Target: </span>
+              <span style={{ color: '#e0e0e0', fontSize: '0.85rem', fontFamily: 'monospace' }}>
+                {backupSettings.backup_target || <span style={{ color: '#f87171' }}>not configured</span>}
+              </span>
+            </div>
+            <div>
+              <span style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase' }}>Schedule: </span>
+              {backupSettings.backup_schedule
+                ? <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{describeCron(backupSettings.backup_schedule)}</span>
+                : <span style={{ color: '#6b7280', fontSize: '0.85rem' }}>not set</span>
+              }
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            {statsUpdatedAt > 0 && (
+              <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>
+                Stats: {new Date(statsUpdatedAt * 1000).toLocaleString()}
+              </span>
+            )}
+            <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+              onClick={() => fetchStats(true)} disabled={statsLoading}>
+              {statsLoading ? 'Calculating...' : 'Refresh Stats'}
+            </button>
+            <button
+              style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+              onClick={() => {
+                setSettingsForm(f => ({ ...f, target: backupSettings.backup_target }))
+                setEditingSettings(!editingSettings)
+              }}
+            >{editingSettings ? 'Cancel' : 'Edit'}</button>
+          </div>
         </div>
-        <div>
-          <span style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase' }}>Schedule: </span>
-          {backupSettings.backup_schedule
-            ? <span style={{ color: '#e0e0e0', fontSize: '0.85rem' }}>{describeCron(backupSettings.backup_schedule)}</span>
-            : <span style={{ color: '#6b7280', fontSize: '0.85rem' }}>not set</span>
-          }
-        </div>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          {statsUpdatedAt > 0 && (
-            <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>
-              Stats: {new Date(statsUpdatedAt * 1000).toLocaleString()}
-            </span>
-          )}
-          <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
-            onClick={() => fetchStats(true)} disabled={statsLoading}>
-            {statsLoading ? 'Calculating...' : 'Refresh Stats'}
-          </button>
-        </div>
+
+        {/* Inline schedule builder */}
+        {editingSettings && (
+          <div style={{ borderTop: '1px solid #2a2a3e', paddingTop: '0.75rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '0.75rem', alignItems: 'end', marginBottom: '0.75rem' }}>
+              <div>
+                <label style={labelStyle}>Backup Target Path</label>
+                <input
+                  style={inputStyle}
+                  placeholder="/mnt/nas/backups"
+                  value={settingsForm.target}
+                  onChange={e => setSettingsForm(f => ({ ...f, target: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label style={labelStyle}>Hour</label>
+                <select
+                  style={{ ...selectStyle, width: 'auto' }}
+                  value={settingsForm.hour}
+                  onChange={e => setSettingsForm(f => ({ ...f, hour: e.target.value }))}
+                >
+                  {Array.from({ length: 24 }, (_, i) => (
+                    <option key={i} value={String(i)}>
+                      {i === 0 ? '12am' : i < 12 ? `${i}am` : i === 12 ? '12pm' : `${i - 12}pm`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>Minute</label>
+                <select
+                  style={{ ...selectStyle, width: 'auto' }}
+                  value={settingsForm.minute}
+                  onChange={e => setSettingsForm(f => ({ ...f, minute: e.target.value }))}
+                >
+                  {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map(m => (
+                    <option key={m} value={String(m)}>{String(m).padStart(2, '0')}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ ...labelStyle, marginBottom: '0.4rem' }}>Days</label>
+              <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, i) => {
+                  const val = String(i)
+                  const active = settingsForm.days.has(val)
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        const next = new Set(settingsForm.days)
+                        if (active) next.delete(val); else next.add(val)
+                        setSettingsForm(f => ({ ...f, days: next }))
+                      }}
+                      style={{
+                        padding: '0.25rem 0.55rem', borderRadius: '4px', cursor: 'pointer',
+                        border: '1px solid #2a2a3e', fontSize: '0.82rem',
+                        background: active ? '#7c9ef8' : '#0f0f1a',
+                        color: active ? '#0f0f1a' : '#8890a0',
+                        fontWeight: active ? 600 : 400,
+                      }}
+                    >{day}</button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* Preview */}
+            {settingsForm.days.size > 0 && (
+              <div style={{ color: '#8890a0', fontSize: '0.78rem', marginBottom: '0.75rem' }}>
+                Schedule: <span style={{ color: '#e0e0e0' }}>{describeCron(`${settingsForm.minute} ${settingsForm.hour} * * ${settingsForm.days.size === 7 ? '*' : Array.from(settingsForm.days).sort().join(',')}`)}</span>
+              </div>
+            )}
+
+            <button
+              style={btnPrimary}
+              disabled={settingsSaving || !settingsForm.target || settingsForm.days.size === 0}
+              onClick={saveBackupSettings}
+            >{settingsSaving ? 'Saving...' : 'Save Settings'}</button>
+          </div>
+        )}
       </div>
 
       {/* Summary cards */}
@@ -771,6 +910,38 @@ export default function Backups() {
           </div>
         )}
       </div>
+
+      {/* Size chart */}
+      {stats.length > 0 && (() => {
+        const maxBytes = Math.max(...stats.map(s => s.size_bytes), 1)
+        const sorted = [...stats].sort((a, b) => b.size_bytes - a.size_bytes)
+        return (
+          <div style={cardStyle}>
+            <h2 style={{ color: '#e0e0e0', fontSize: '1rem', margin: '0 0 0.75rem 0' }}>Backup Size by Path</h2>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+              {sorted.map((s, i) => {
+                const pct = maxBytes > 0 ? (s.size_bytes / maxBytes) * 100 : 0
+                const label = `${s.host}: ${s.path.replace(/^.*\/([^/]+)$/, '$1')}`
+                return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <div style={{ width: '200px', flexShrink: 0, color: '#8890a0', fontSize: '0.75rem', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={label}>{label}</div>
+                    <div style={{ flex: 1, height: '14px', background: '#0f0f1a', borderRadius: '3px', overflow: 'hidden', position: 'relative' }}>
+                      <div style={{
+                        width: `${pct}%`, height: '100%', borderRadius: '3px',
+                        background: pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#7c9ef8',
+                        transition: 'width 0.3s ease',
+                      }} />
+                    </div>
+                    <div style={{ width: '70px', flexShrink: 0, color: '#e0e0e0', fontSize: '0.78rem', textAlign: 'right', fontFamily: 'monospace' }}>
+                      {formatBytes(s.size_bytes)}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* All paths grouped by host */}
       {sortedHosts.map(([host, hostPaths]) => (

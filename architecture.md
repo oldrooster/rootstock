@@ -106,12 +106,16 @@ Business logic layer. Services are stateless functions or lightweight classes.
 - `dns_service.py` -- Also generates Pi-hole custom lists and TOML configs
 
 **Execution services** (run infrastructure tools):
-- `terraform_executor.py` -- Prepares workspace (main.tf + tfvars with resolved secrets), streams `terraform plan/apply/destroy`
-- `ansible_executor.py` -- Prepares workspace per scope (roles, containers, dns, ingress), generates playbooks, streams `ansible-playbook` execution
+- `terraform_executor.py` -- Prepares workspace (main.tf + tfvars with resolved secrets), streams `terraform plan/apply/destroy`. Snapshots `terraform.tfstate` before each apply for rollback.
+- `ansible_executor.py` -- Thin coordinator: prepares workspace, delegates to per-scope executors, streams `ansible-playbook`
+- `roles_executor.py`, `containers_executor.py`, `dns_executor.py`, `ingress_executor.py`, `backups_executor.py` -- Per-scope playbook generation using `playbook_util.dump_playbook()` (dict + ruamel.yaml)
+- `playbook_util.py` -- `dump_playbook(plays)`, `task()`, `literal()` helpers for structured YAML generation
 - `git_service.py` -- GitPython wrapper for init, commit, push
+- `ssh_service.py` -- Shared SSH helpers (`ssh_exec`, `open_ssh_client`, `load_private_key`) used by containers, backups, and ingress routers
 
 **Other services**:
 - `apply_state.py` -- Tracks dirty areas by comparing file mtimes vs last-apply timestamps
+- `apply_history.py` -- JSON log of apply runs (timestamp, scope, exit code, truncated log)
 - `yaml_service.py` -- YAML read/write using ruamel.yaml (preserves formatting)
 - `move_service.py` -- Container migration between hosts
 
@@ -135,7 +139,9 @@ The Apply system is the core orchestration layer. It has five scopes:
 VM/Node/Template/Image definitions
   → terraform_service.generate_main_tf()     # Generates HCL
   → terraform_executor.prepare_workspace()   # Writes main.tf + tfvars
+  → terraform_executor.snapshot_state()      # Copies tfstate before apply
   → terraform plan / apply / destroy         # Streamed to frontend
+  → POST /api/apply/terraform/rollback       # Restores pre-apply snapshot
 ```
 
 **Generated Terraform includes:**
@@ -295,15 +301,16 @@ Each page is a self-contained React component with inline styles (no CSS framewo
 | `Ingress.tsx` | Rules table, manual rules, settings, tunnel tokens, Caddyfile preview |
 | `Backups.tsx` | Paths with stats, manual paths, backup/restore dialogs, export/import |
 | `Git.tsx` | Status, push |
-| `Apply.tsx` | Dirty indicators, scoped apply, streaming output |
+| `Apply.tsx` | Dirty indicators, scoped apply, streaming output, plan diff viewer, Terraform rollback button |
 | `Secrets.tsx` | Key list with filter, add/update/delete, SSH key generation |
 | `Settings.tsx` | Global settings form |
 
 ### Components
 
 - `Layout.tsx` -- Main layout with sidebar and persistent Apply modal
-- `Sidebar.tsx` -- Navigation menu with dirty-state indicator
+- `Sidebar.tsx` -- Navigation menu with dirty-state indicator, dark/light theme toggle, hamburger on mobile
 - `Terminal.tsx` -- xterm.js WebSocket terminal component
+- `CommandPalette.tsx` -- `Ctrl+K` fuzzy search across all entities
 
 ### Hooks
 

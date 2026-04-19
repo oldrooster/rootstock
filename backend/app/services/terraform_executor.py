@@ -143,6 +143,58 @@ async def run_terraform(
         yield f"\n✗ terraform {command[0]} failed (exit code {exit_code})\n"
 
 
+async def run_terraform_capture(
+    command: list[str],
+    working_dir: Path,
+) -> tuple[int, str]:
+    """Run a terraform command and return (exit_code, combined_output)."""
+    cmd = ["terraform", *command]
+    logger.info("Running (capture): %s in %s", " ".join(cmd), working_dir)
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=str(working_dir),
+        env=_terraform_env(),
+    )
+    assert process.stdout is not None
+    stdout, _ = await process.communicate()
+    exit_code = process.returncode or 0
+    return exit_code, stdout.decode("utf-8", errors="replace")
+
+
+def snapshot_state(terraform_dir: Path) -> bool:
+    """Copy terraform.tfstate to terraform.tfstate.rollback before applying.
+
+    Returns True if a snapshot was created, False if there was nothing to snapshot.
+    """
+    state_file = terraform_dir / "terraform.tfstate"
+    if not state_file.exists():
+        return False
+    import shutil
+    shutil.copy2(state_file, terraform_dir / "terraform.tfstate.rollback")
+    return True
+
+
+def rollback_state(terraform_dir: Path) -> bool:
+    """Restore terraform.tfstate from terraform.tfstate.rollback.
+
+    Returns True if the rollback was applied, False if no snapshot exists.
+    """
+    rollback_file = terraform_dir / "terraform.tfstate.rollback"
+    if not rollback_file.exists():
+        return False
+    import shutil
+    shutil.copy2(rollback_file, terraform_dir / "terraform.tfstate")
+    return True
+
+
+def rollback_snapshot_exists(terraform_dir: Path) -> bool:
+    """Return True if a rollback snapshot exists."""
+    return (terraform_dir / "terraform.tfstate.rollback").exists()
+
+
 def _terraform_env() -> dict[str, str]:
     """Build environment for terraform subprocess."""
     import os

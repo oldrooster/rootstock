@@ -1,7 +1,7 @@
 import asyncio
-import io
 import json
 import logging
+import shlex
 import time
 from datetime import datetime
 
@@ -20,6 +20,10 @@ from app.services.backup_service import (
 )
 from app.services.container_store import ContainerStore
 from app.services.global_settings import get_global_settings
+from app.services.ssh_service import (
+    load_private_key as _load_private_key,
+    ssh_exec as _ssh_exec_impl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,26 +49,9 @@ def get_store() -> ContainerStore:
     return ContainerStore(settings.homelab_repo_path)
 
 
-def _load_private_key(pem: str) -> paramiko.PKey:
-    try:
-        return paramiko.Ed25519Key.from_private_key(io.StringIO(pem))
-    except Exception:
-        return paramiko.RSAKey.from_private_key(io.StringIO(pem))
-
-
 def _ssh_exec(host: str, user: str, pem: str, command: str,
               timeout: int = 30) -> tuple[int, str, str]:
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    pkey = _load_private_key(pem)
-    try:
-        client.connect(hostname=host, username=user, pkey=pkey, timeout=15,
-                       look_for_keys=False, allow_agent=False)
-        _, stdout, stderr = client.exec_command(command, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        return exit_code, stdout.read().decode(), stderr.read().decode()
-    finally:
-        client.close()
+    return _ssh_exec_impl(host, user, pem, command, timeout)
 
 
 async def _resolve_host_ssh(host_name: str) -> tuple[str, str, str]:
@@ -345,7 +332,7 @@ async def purge_backups(body: PurgeRequest):
             try:
                 exit_code, _, stderr = await loop.run_in_executor(
                     None, lambda d=snapshot_dir: _ssh_exec(ip, user, pem,
-                                                           f"sudo rm -rf {d}", timeout=120)
+                                                           f"sudo rm -rf {shlex.quote(d)}", timeout=120)
                 )
                 if exit_code != 0:
                     results.append({"host": host, "slug": slug, "date": date,
@@ -612,7 +599,7 @@ async def backup_restore(
             for ctr_name in affected_list:
                 await loop.run_in_executor(
                     None, lambda n=ctr_name: _ssh_exec(ip, user, pem,
-                                                       f"sudo docker stop {n}", timeout=60)
+                                                       f"sudo docker stop {shlex.quote(n)}", timeout=60)
                 )
             await send_step("stop", "done", f"Stopped {len(affected_list)} container(s)")
         else:
@@ -625,7 +612,7 @@ async def backup_restore(
             vol_step = f"restore:{slug}"
             await send_step(vol_step, "running", f"Restoring {vol_path}...")
 
-            rsync_cmd = f"sudo mkdir -p {vol_path} && sudo rsync -a --delete --info=progress2 {src_dir}/ {vol_path}/ 2>&1"
+            rsync_cmd = f"sudo mkdir -p {shlex.quote(vol_path)} && sudo rsync -a --delete --info=progress2 {shlex.quote(src_dir)}/ {shlex.quote(vol_path)}/ 2>&1"
 
             try:
                 client = paramiko.SSHClient()
@@ -676,7 +663,7 @@ async def backup_restore(
             for ctr_name in affected_list:
                 await loop.run_in_executor(
                     None, lambda n=ctr_name: _ssh_exec(ip, user, pem,
-                                                       f"sudo docker start {n}", timeout=60)
+                                                       f"sudo docker start {shlex.quote(n)}", timeout=60)
                 )
             await send_step("start", "done", f"Started {len(affected_list)} container(s)")
         else:

@@ -1,4 +1,6 @@
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+from app.models.common import _validate_name
 
 
 class PortMapping(BaseModel):
@@ -33,6 +35,12 @@ class ComposeExtra(BaseModel):
 class ContainerDefinition(BaseModel):
     name: str
     enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_valid(cls, v: str) -> str:
+        return _validate_name(v)
+
     image: str
     hosts: list[str] = []
     host_rule: str = ""  # e.g. "role:docker"
@@ -98,6 +106,12 @@ class ContainerDefinition(BaseModel):
 class ContainerCreate(BaseModel):
     name: str
     enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_valid(cls, v: str) -> str:
+        return _validate_name(v)
+
     image: str
     hosts: list[str] = []
     host_rule: str = ""

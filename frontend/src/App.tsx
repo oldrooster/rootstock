@@ -17,6 +17,9 @@ import Secrets from './pages/Secrets'
 import Settings from './pages/Settings'
 import Stats from './pages/Stats'
 import { isAuthenticated } from './lib/api'
+import { ToastProvider } from './contexts/ToastContext'
+import { ThemeProvider } from './contexts/ThemeContext'
+import CommandPalette from './components/CommandPalette'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   if (!isAuthenticated()) {
@@ -27,7 +30,10 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
+    <ThemeProvider>
+      <ToastProvider>
     <BrowserRouter>
+      <CommandPalette />
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route
@@ -59,5 +65,7 @@ export default function App() {
         </Route>
       </Routes>
     </BrowserRouter>
+      </ToastProvider>
+    </ThemeProvider>
   )
 }

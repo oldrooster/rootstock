@@ -1,5 +1,29 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 
+interface HistoryRun { timestamp: number; scope: string; exit_code: number; log: string }
+
+interface PlanFieldDiff {
+  key: string
+  before: string | null
+  after: string | null
+  change_type: 'add' | 'remove' | 'update'
+}
+
+interface PlanResourceChange {
+  address: string
+  module_address: string | null
+  type: string
+  name: string
+  action: 'create' | 'update' | 'destroy' | 'replace'
+  fields: PlanFieldDiff[]
+}
+
+interface PlanDiff {
+  summary: { add: number; change: number; destroy: number; no_op: number }
+  changes: PlanResourceChange[]
+  terraform_version: string | null
+}
+
 interface ApplyPreview {
   total_services: number
   enabled_services: number
@@ -163,13 +187,26 @@ export default function Apply() {
   const [dirty, setDirty] = useState<DirtyStatus>({ dirty: {}, any_dirty: false })
   const [error, setError] = useState<string | null>(null)
 
+  // Plan diff
+  const [planDiff, setPlanDiff] = useState<PlanDiff | null>(null)
+  const [planDiffLoading, setPlanDiffLoading] = useState(false)
+  const [planDiffError, setPlanDiffError] = useState<string | null>(null)
+  const [planDiffExpanded, setPlanDiffExpanded] = useState<Set<string>>(new Set())
+
   // Execution
   const [running, setRunning] = useState(false)
   const [runningScope, setRunningScope] = useState<string | null>(null)
   const [log, setLog] = useState('')
   const [confirmDestroy, setConfirmDestroy] = useState(false)
+  const [destroyResources, setDestroyResources] = useState<string[] | null>(null)
+  const [destroyLoading, setDestroyLoading] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+
+  // History
+  const [history, setHistory] = useState<Record<string, HistoryRun[]>>({})
+  const [historyScope, setHistoryScope] = useState<string | null>(null)
+  const [historyExpanded, setHistoryExpanded] = useState(false)
 
   // Roles selection
   const [availableRoles, setAvailableRoles] = useState<RoleInfo[]>([])
@@ -185,6 +222,11 @@ export default function Apply() {
   const [selectedIngressHosts, setSelectedIngressHosts] = useState<Set<string>>(new Set())
   const [ingressExpanded, setIngressExpanded] = useState(false)
 
+  // Rollback
+  const [rollbackAvailable, setRollbackAvailable] = useState(false)
+  const [rollbackConfirm, setRollbackConfirm] = useState(false)
+  const [rollbackLoading, setRollbackLoading] = useState(false)
+
   // Ansible options
   const [ansibleDiff, setAnsibleDiff] = useState(true)
   const [ansibleVerbosity, setAnsibleVerbosity] = useState(0)
@@ -197,6 +239,77 @@ export default function Apply() {
     ])
       .then(([p, s]) => { setPreview(p); setDirty(s) })
       .catch(e => setError(e.message))
+  }
+
+  const fetchRollbackStatus = () => {
+    fetch('/api/apply/terraform/rollback-status')
+      .then(r => r.json())
+      .then(d => setRollbackAvailable(d.available))
+      .catch(() => {})
+  }
+
+  async function handleRollback() {
+    setRollbackLoading(true)
+    setError(null)
+    try {
+      const r = await fetch('/api/apply/terraform/rollback', { method: 'POST' })
+      if (!r.ok) {
+        const d = await r.json().catch(() => null)
+        throw new Error(d?.detail || `HTTP ${r.status}`)
+      }
+      setRollbackConfirm(false)
+      fetchRollbackStatus()
+      fetchStatus()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setRollbackLoading(false)
+    }
+  }
+
+  const fetchHistory = () => {
+    fetch('/api/apply/history')
+      .then(r => r.json())
+      .then(setHistory)
+      .catch(() => {})
+  }
+
+  async function fetchPlanDiff() {
+    setPlanDiffLoading(true)
+    setPlanDiffError(null)
+    setPlanDiff(null)
+    setPlanDiffExpanded(new Set())
+    try {
+      const r = await fetch('/api/apply/terraform/plan-diff', { method: 'POST' })
+      if (!r.ok) {
+        const data = await r.json().catch(() => null)
+        throw new Error(data?.detail || `HTTP ${r.status}`)
+      }
+      const data: PlanDiff = await r.json()
+      setPlanDiff(data)
+      // Auto-expand all changed resources
+      setPlanDiffExpanded(new Set(data.changes.map(c => c.address)))
+    } catch (e) {
+      setPlanDiffError((e as Error).message)
+    } finally {
+      setPlanDiffLoading(false)
+    }
+  }
+
+  async function loadDestroyPreview() {
+    setDestroyLoading(true)
+    setDestroyResources(null)
+    try {
+      const r = await fetch('/api/apply/terraform/destroy-preview', { method: 'POST' })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data = await r.json()
+      setDestroyResources(data.resources || [])
+      setConfirmDestroy(true)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setDestroyLoading(false)
+    }
   }
 
   const fetchRoles = () => {
@@ -229,6 +342,8 @@ export default function Apply() {
     fetchStatus()
     fetchRoles()
     fetchContainers()
+    fetchHistory()
+    fetchRollbackStatus()
     const interval = setInterval(fetchStatus, 30000)
     return () => clearInterval(interval)
   }, [])
@@ -278,8 +393,10 @@ export default function Apply() {
         setLog(prev => prev + decoder.decode(value, { stream: true }))
       }
 
-      // Refresh dirty status after run
+      // Refresh dirty status, history, and rollback availability after run
       fetchStatus()
+      fetchHistory()
+      fetchRollbackStatus()
     } catch (e) {
       if ((e as Error).name !== 'AbortError') setError((e as Error).message)
     } finally {
@@ -442,11 +559,18 @@ export default function Apply() {
               {section.type === 'terraform' ? (
                 <>
                   <button
+                    style={{ ...btnSecondary, padding: '0.35rem 0.75rem', fontSize: '0.8rem', borderColor: '#7c9ef8', color: '#7c9ef8', opacity: (running || planDiffLoading) ? 0.5 : 1 }}
+                    disabled={running || planDiffLoading}
+                    onClick={fetchPlanDiff}
+                  >
+                    {planDiffLoading ? 'Planning...' : 'Plan Diff'}
+                  </button>
+                  <button
                     style={{ ...btnPrimary, padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
                     disabled={running}
                     onClick={() => streamAction('/api/apply/terraform/plan', 'terraform-plan')}
                   >
-                    {running && runningScope === 'terraform-plan' ? 'Planning...' : 'Plan'}
+                    {running && runningScope === 'terraform-plan' ? 'Planning...' : 'Plan (raw)'}
                   </button>
                   <button
                     style={{ ...btnApply, padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
@@ -457,10 +581,10 @@ export default function Apply() {
                   </button>
                   {!confirmDestroy ? (
                     <button
-                      style={{ ...btnDanger, padding: '0.35rem 0.75rem', fontSize: '0.8rem', opacity: running ? 0.5 : 1 }}
-                      disabled={running}
-                      onClick={() => setConfirmDestroy(true)}
-                    >Destroy</button>
+                      style={{ ...btnDanger, padding: '0.35rem 0.75rem', fontSize: '0.8rem', opacity: (running || destroyLoading) ? 0.5 : 1 }}
+                      disabled={running || destroyLoading}
+                      onClick={loadDestroyPreview}
+                    >{destroyLoading ? 'Loading...' : 'Destroy'}</button>
                   ) : (
                     <>
                       <button
@@ -469,7 +593,27 @@ export default function Apply() {
                       >Confirm Destroy</button>
                       <button
                         style={{ ...btnSecondary, padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
-                        onClick={() => setConfirmDestroy(false)}
+                        onClick={() => { setConfirmDestroy(false); setDestroyResources(null) }}
+                      >Cancel</button>
+                    </>
+                  )}
+                  {rollbackAvailable && !rollbackConfirm && (
+                    <button
+                      style={{ ...btnSecondary, padding: '0.35rem 0.75rem', fontSize: '0.8rem', borderColor: '#f59e0b', color: '#f59e0b', opacity: running ? 0.5 : 1 }}
+                      disabled={running}
+                      onClick={() => setRollbackConfirm(true)}
+                    >Rollback</button>
+                  )}
+                  {rollbackConfirm && (
+                    <>
+                      <button
+                        style={{ ...btnSecondary, padding: '0.35rem 0.75rem', fontSize: '0.8rem', borderColor: '#f59e0b', color: '#f59e0b', opacity: rollbackLoading ? 0.5 : 1 }}
+                        disabled={rollbackLoading}
+                        onClick={handleRollback}
+                      >{rollbackLoading ? 'Restoring...' : 'Confirm Rollback'}</button>
+                      <button
+                        style={{ ...btnSecondary, padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                        onClick={() => setRollbackConfirm(false)}
                       >Cancel</button>
                     </>
                   )}
@@ -486,6 +630,20 @@ export default function Apply() {
             </div>
           </div>
           <p style={{ color: '#8890a0', fontSize: '0.8rem', margin: 0 }}>{section.description}</p>
+
+          {/* Destroy preview resources */}
+          {section.type === 'terraform' && confirmDestroy && destroyResources !== null && (
+            <div style={{ marginTop: '0.75rem', padding: '0.6rem 0.75rem', background: '#3b0808', border: '1px solid #7f1d1d', borderRadius: '4px' }}>
+              <div style={{ color: '#fca5a5', fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.4rem' }}>
+                {destroyResources.length === 0
+                  ? 'No resources to destroy'
+                  : `${destroyResources.length} resource(s) will be destroyed:`}
+              </div>
+              {destroyResources.map(r => (
+                <div key={r} style={{ color: '#fca5a5', fontSize: '0.8rem', fontFamily: 'monospace', padding: '0.1rem 0' }}>- {r}</div>
+              ))}
+            </div>
+          )}
 
           {/* Expandable role selector */}
           {isRoles && rolesExpanded && availableRoles.length > 0 && (
@@ -610,6 +768,121 @@ export default function Apply() {
         )
       })}
 
+      {/* Plan Diff Viewer */}
+      {(planDiff || planDiffError) && (
+        <div style={{ ...cardStyle, marginTop: '0.5rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <h2 style={{ color: '#e0e0e0', fontSize: '0.95rem', margin: 0 }}>Terraform Plan</h2>
+            <button style={{ ...btnSecondary, padding: '0.2rem 0.5rem', fontSize: '0.75rem' }} onClick={() => { setPlanDiff(null); setPlanDiffError(null) }}>Clear</button>
+          </div>
+
+          {planDiffError && (
+            <pre style={{ color: '#fca5a5', fontSize: '0.8rem', background: '#3b0808', padding: '0.75rem', borderRadius: '4px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0 }}>
+              {planDiffError}
+            </pre>
+          )}
+
+          {planDiff && (
+            <>
+              {/* Summary bar */}
+              <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                {[
+                  { label: 'add', count: planDiff.summary.add, color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
+                  { label: 'change', count: planDiff.summary.change, color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+                  { label: 'destroy', count: planDiff.summary.destroy, color: '#ef4444', bg: 'rgba(239,68,68,0.12)' },
+                  { label: 'no-op', count: planDiff.summary.no_op, color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
+                ].map(({ label, count, color, bg }) => (
+                  <div key={label} style={{ background: bg, borderRadius: '6px', padding: '0.4rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span style={{ color, fontWeight: 700, fontSize: '1.1rem' }}>{count}</span>
+                    <span style={{ color, fontSize: '0.78rem' }}>{label}</span>
+                  </div>
+                ))}
+                {planDiff.terraform_version && (
+                  <span style={{ color: '#6b7280', fontSize: '0.72rem', alignSelf: 'center', marginLeft: 'auto' }}>
+                    Terraform {planDiff.terraform_version}
+                  </span>
+                )}
+              </div>
+
+              {planDiff.changes.length === 0 ? (
+                <p style={{ color: '#22c55e', fontSize: '0.9rem', margin: 0 }}>No changes. Infrastructure is up-to-date.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                  {planDiff.changes.map(rc => {
+                    const isExpanded = planDiffExpanded.has(rc.address)
+                    const actionColor = rc.action === 'create' ? '#22c55e' : rc.action === 'destroy' ? '#ef4444' : rc.action === 'replace' ? '#f97316' : '#f59e0b'
+                    const actionSymbol = rc.action === 'create' ? '+' : rc.action === 'destroy' ? '-' : rc.action === 'replace' ? '±' : '~'
+                    return (
+                      <div key={rc.address} style={{ background: '#0f0f1a', border: '1px solid #2a2a3e', borderRadius: '4px', overflow: 'hidden' }}>
+                        <button
+                          onClick={() => setPlanDiffExpanded(prev => {
+                            const next = new Set(prev)
+                            if (next.has(rc.address)) next.delete(rc.address)
+                            else next.add(rc.address)
+                            return next
+                          })}
+                          style={{
+                            display: 'flex', width: '100%', alignItems: 'center', gap: '0.6rem',
+                            background: 'transparent', border: 'none', cursor: 'pointer',
+                            padding: '0.5rem 0.75rem', textAlign: 'left',
+                          }}
+                        >
+                          <span style={{
+                            color: actionColor, fontWeight: 700, fontSize: '1rem',
+                            width: '1.2rem', textAlign: 'center', flexShrink: 0,
+                          }}>{actionSymbol}</span>
+                          <span style={{ color: '#e0e0e0', fontSize: '0.85rem', fontFamily: 'monospace', flex: 1 }}>{rc.address}</span>
+                          <span style={{
+                            fontSize: '0.7rem', padding: '0.1rem 0.5rem', borderRadius: '9999px', flexShrink: 0,
+                            background: rc.action === 'create' ? 'rgba(34,197,94,0.15)' : rc.action === 'destroy' ? 'rgba(239,68,68,0.15)' : rc.action === 'replace' ? 'rgba(249,115,22,0.15)' : 'rgba(245,158,11,0.15)',
+                            color: actionColor,
+                          }}>{rc.action}</span>
+                          <span style={{ color: '#6b7280', fontSize: '0.72rem', flexShrink: 0 }}>{isExpanded ? '▾' : '▸'} {rc.fields.length} field{rc.fields.length !== 1 ? 's' : ''}</span>
+                        </button>
+
+                        {isExpanded && rc.fields.length > 0 && (
+                          <div style={{ borderTop: '1px solid #2a2a3e' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem', fontFamily: 'monospace' }}>
+                              <tbody>
+                                {rc.fields.map((f, fi) => (
+                                  <tr key={fi} style={{ borderBottom: '1px solid #1a1a2e' }}>
+                                    <td style={{ color: '#8890a0', padding: '0.3rem 0.75rem', width: '30%', verticalAlign: 'top', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                      {f.key}
+                                    </td>
+                                    <td style={{ padding: '0.3rem 0.25rem', width: '35%', verticalAlign: 'top' }}>
+                                      {f.before != null ? (
+                                        <span style={{ color: '#fca5a5', display: 'block', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                          - {f.before}
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: '#4b5563' }}>-</span>
+                                      )}
+                                    </td>
+                                    <td style={{ padding: '0.3rem 0.25rem 0.3rem 0', width: '35%', verticalAlign: 'top' }}>
+                                      {f.after != null ? (
+                                        <span style={{ color: f.after === '(known after apply)' ? '#6b7280' : '#86efac', display: 'block', whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontStyle: f.after === '(known after apply)' ? 'italic' : 'normal' }}>
+                                          + {f.after}
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: '#4b5563' }}>-</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {/* Streaming output */}
       {(log || running) && (
         <div style={{ marginTop: '0.75rem' }}>
@@ -622,6 +895,92 @@ export default function Apply() {
             )}
           </div>
           <AnsiPre ref={logRef} style={logStyle} text={log || 'Starting...\n'} />
+        </div>
+      )}
+
+      {/* Apply History */}
+      {Object.keys(history).length > 0 && (
+        <div style={{ ...cardStyle, marginTop: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: historyExpanded ? '0.75rem' : 0 }}>
+            <button
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#e0e0e0', fontSize: '0.95rem', fontWeight: 600, padding: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+              onClick={() => setHistoryExpanded(!historyExpanded)}
+            >
+              {historyExpanded ? '▾' : '▸'} Apply History
+            </button>
+            <button
+              style={{ ...btnSecondary, padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+              onClick={fetchHistory}
+            >Refresh</button>
+          </div>
+          {historyExpanded && (
+            <>
+              {/* Scope tabs */}
+              <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                <button
+                  style={{
+                    fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '9999px', cursor: 'pointer',
+                    border: '1px solid #2a2a3e',
+                    background: historyScope === null ? '#7c9ef8' : 'transparent',
+                    color: historyScope === null ? '#0f0f1a' : '#b0b8d0',
+                  }}
+                  onClick={() => setHistoryScope(null)}
+                >All</button>
+                {Object.keys(history).sort().map(scope => (
+                  <button
+                    key={scope}
+                    style={{
+                      fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '9999px', cursor: 'pointer',
+                      border: '1px solid #2a2a3e',
+                      background: historyScope === scope ? '#7c9ef8' : 'transparent',
+                      color: historyScope === scope ? '#0f0f1a' : '#b0b8d0',
+                    }}
+                    onClick={() => setHistoryScope(scope)}
+                  >{scope}</button>
+                ))}
+              </div>
+
+              {/* History entries */}
+              {(() => {
+                const entries: (HistoryRun & { scope: string })[] = []
+                for (const [scope, runs] of Object.entries(history)) {
+                  if (historyScope && scope !== historyScope) continue
+                  for (const run of runs) {
+                    entries.push({ ...run, scope })
+                  }
+                }
+                entries.sort((a, b) => b.timestamp - a.timestamp)
+                const shown = entries.slice(0, 20)
+                return shown.map((run, i) => (
+                  <details key={i} style={{ marginBottom: '0.4rem', borderRadius: '4px', background: '#0f0f1a', border: '1px solid #2a2a3e', overflow: 'hidden' }}>
+                    <summary style={{
+                      cursor: 'pointer',
+                      padding: '0.45rem 0.75rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.6rem',
+                      listStyle: 'none',
+                      userSelect: 'none',
+                    }}>
+                      <span style={{
+                        fontSize: '0.7rem', padding: '0.1rem 0.4rem', borderRadius: '9999px',
+                        background: run.exit_code === 0 ? '#166534' : '#7f1d1d',
+                        color: run.exit_code === 0 ? '#86efac' : '#fca5a5',
+                        flexShrink: 0,
+                      }}>{run.exit_code === 0 ? 'ok' : 'failed'}</span>
+                      <span style={{ color: '#7c9ef8', fontSize: '0.82rem', fontWeight: 600 }}>{run.scope}</span>
+                      <span style={{ color: '#8890a0', fontSize: '0.78rem' }}>
+                        {new Date(run.timestamp * 1000).toLocaleString()}
+                      </span>
+                    </summary>
+                    <pre style={{ ...logStyle, maxHeight: '200px', margin: 0, borderRadius: 0, border: 'none', borderTop: '1px solid #2a2a3e' }}>
+                      {run.log || '(no log)'}
+                    </pre>
+                  </details>
+                ))
+              })()}
+            </>
+          )}
         </div>
       )}
     </div>

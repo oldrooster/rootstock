@@ -1,15 +1,15 @@
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.models.common import _validate_name
+
 
 class VMDefinition(BaseModel):
     name: str
 
     @field_validator("name")
     @classmethod
-    def name_must_not_be_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("Name must not be blank")
-        return v.strip()
+    def name_must_be_valid(cls, v: str) -> str:
+        return _validate_name(v)
 
     enabled: bool = True
     node: str
@@ -43,10 +43,8 @@ class VMCreate(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def name_must_not_be_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("Name must not be blank")
-        return v.strip()
+    def name_must_be_valid(cls, v: str) -> str:
+        return _validate_name(v)
 
     enabled: bool = True
     node: str

@@ -946,6 +946,15 @@ export default function VMs() {
                       disabled={powerLoading[vm.name] || powerStatus[vm.name] === 'stopped'}
                       onClick={() => powerAction(vm.name, 'stop')}
                     >Stop</button>
+                    <button style={{ ...btnSecondary, fontSize: '0.82rem' }} onClick={async () => {
+                      const newName = window.prompt(`Clone "${vm.name}" as:`, `${vm.name}-copy`)
+                      if (!newName) return
+                      try {
+                        const r = await fetch(`/api/vms/${encodeURIComponent(vm.name)}/clone?new_name=${encodeURIComponent(newName)}`, { method: 'POST' })
+                        if (!r.ok) { const d = await r.json().catch(() => null); throw new Error(d?.detail || `HTTP ${r.status}`) }
+                        loadVMs()
+                      } catch (e) { setError((e as Error).message) }
+                    }}>Clone</button>
                     <button style={btnSecondary} onClick={() => {
                       if (editingName !== null && editingName !== vm.name) {
                         if (!window.confirm('You have unsaved changes. Discard and edit this VM instead?')) return

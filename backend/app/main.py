@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+import logging.config
 import os
 from pathlib import Path
 
@@ -12,11 +14,41 @@ from app.routers import apply, backups, containers, dashboard, dns, git, health,
 from app.routers import auth_router
 
 
+# --- Structured JSON logging ---
+class _JsonFormatter(logging.Formatter):
+    """Minimal JSON log formatter — no extra deps required."""
+    import json as _json
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json, traceback
+        payload: dict = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = traceback.format_exception(*record.exc_info)
+        return json.dumps(payload)
+
+
+def _configure_logging() -> None:
+    root = logging.getLogger()
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(_JsonFormatter())
+        root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    # Quieten noisy third-party loggers
+    for name in ("uvicorn.access", "paramiko"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _configure_logging()
     from app.services.git_service import GitService
     from app.services import stats_collector
-
     from app.services.global_settings import get_global_settings
     GitService(settings.homelab_repo_path).ensure_initialized()
     gs = get_global_settings(settings.homelab_repo_path)
