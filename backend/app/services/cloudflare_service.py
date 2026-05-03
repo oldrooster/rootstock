@@ -41,9 +41,12 @@ def generate_tunnel_config(
     for rule in manual_rules:
         if rule.caddy_host != host or not rule.external:
             continue
+        backend = rule.backend
+        if backend and "://" not in backend:
+            backend = f"http://{backend}"
         ingress_entries.append(
             f"  - hostname: {rule.hostname}\n"
-            f"    service: {rule.backend}"
+            f"    service: {backend}"
         )
 
     if not ingress_entries:
@@ -324,5 +327,8 @@ def collect_external_routes(
     for rule in manual_rules:
         if rule.caddy_host != host or not rule.external:
             continue
-        routes.append((rule.hostname, rule.backend))
+        backend = rule.backend
+        if backend and "://" not in backend:
+            backend = f"http://{backend}"
+        routes.append((rule.hostname, backend))
     return routes

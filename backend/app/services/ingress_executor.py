@@ -72,7 +72,7 @@ def write_ingress_playbook(
         (host_caddy / "Dockerfile").write_text(_CADDY_DOCKERFILE)
         if cf_token:
             (host_caddy / ".env").write_text(f"CF_API_TOKEN={cf_token}\n")
-        tunnel_config = generate_tunnel_config(host, containers, manual_rules)
+        tunnel_config = generate_tunnel_config(host, containers, manual_rules, tunnel_name=f"rootstock-{host}")
         if tunnel_config:
             host_tunnel = tunnel_dir / host
             host_tunnel.mkdir(parents=True, exist_ok=True)

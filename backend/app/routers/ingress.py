@@ -175,7 +175,7 @@ async def preview_tunnel_config(
 ) -> dict[str, str]:
     containers = store.list_all()
     manual_rules = get_manual_rules(settings.homelab_repo_path)
-    content = generate_tunnel_config(host, containers, manual_rules)
+    content = generate_tunnel_config(host, containers, manual_rules, tunnel_name=f"rootstock-{host}")
     return {"content": content}
 
 
