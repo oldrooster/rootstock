@@ -25,6 +25,8 @@ class GlobalSettings(BaseModel):
     docker_vols_base: str = "/var/docker_vols"
     backup_target: str = "/mnt/share/backups"
     backup_schedule: str = ""
+    backup_stats_host: str = ""       # SSH directly to this host for stats (e.g. NFS server)
+    backup_stats_cache_ttl: int = 21600  # seconds; default 6 hours
     role_order: list[str] = []
     s3_sync: S3SyncConfig = S3SyncConfig()
     stats: StatsConfig = StatsConfig()

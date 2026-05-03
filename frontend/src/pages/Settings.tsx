@@ -13,6 +13,8 @@ interface GlobalSettings {
   docker_vols_base: string
   backup_target: string
   backup_schedule: string
+  backup_stats_host: string
+  backup_stats_cache_ttl: number
 }
 
 interface DNSSettings {
@@ -138,8 +140,9 @@ function describeCron(expr: string): string {
 export default function Settings() {
   const [data, setData] = useState<AllSettings | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [globalForm, setGlobalForm] = useState<GlobalSettings>({ docker_vols_base: '/var/docker_vols', backup_target: '/mnt/share/backups', backup_schedule: '' })
+  const [globalForm, setGlobalForm] = useState<GlobalSettings>({ docker_vols_base: '/var/docker_vols', backup_target: '/mnt/share/backups', backup_schedule: '', backup_stats_host: '', backup_stats_cache_ttl: 21600 })
   const [globalDirty, setGlobalDirty] = useState(false)
+  const [statsHosts, setStatsHosts] = useState<{ name: string; label: string }[]>([])
   useUnsavedChanges(globalDirty)
   const navigate = useNavigate()
 
@@ -151,6 +154,21 @@ export default function Settings() {
         setGlobalForm(d.global_settings)
       })
       .catch(e => setError(e.message))
+
+    // Load nodes and VMs for stats host dropdown
+    Promise.all([
+      fetch('/api/nodes/').then(r => r.json()).catch(() => []),
+      fetch('/api/vms/').then(r => r.json()).catch(() => []),
+    ]).then(([nodes, vms]) => {
+      const hosts: { name: string; label: string }[] = []
+      for (const n of nodes) {
+        if (n.enabled) hosts.push({ name: n.name, label: `${n.name} (node)` })
+      }
+      for (const v of vms) {
+        if (v.enabled && v.managed && v.ip) hosts.push({ name: v.name, label: `${v.name} (vm)` })
+      }
+      setStatsHosts(hosts.sort((a, b) => a.name.localeCompare(b.name)))
+    })
   }, [])
 
   const saveGlobal = () => {
@@ -228,6 +246,37 @@ export default function Settings() {
             />
             <p style={{ color: '#8890a0', fontSize: '0.75rem', margin: '0.35rem 0 0 0' }}>
               {describeCron(globalForm.backup_schedule)}
+            </p>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+          <div>
+            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Stats Host (NFS server)</label>
+            <select
+              style={{ ...inputStyle, width: '100%' }}
+              value={globalForm.backup_stats_host}
+              onChange={e => { setGlobalForm({ ...globalForm, backup_stats_host: e.target.value }); setGlobalDirty(true) }}
+            >
+              <option value="">— scan each docker host individually —</option>
+              {statsHosts.map(h => (
+                <option key={h.name} value={h.name}>{h.label}</option>
+              ))}
+            </select>
+            <p style={{ color: '#8890a0', fontSize: '0.75rem', margin: '0.35rem 0 0 0' }}>
+              SSH to this host for backup size stats. Use the NFS server for faster local-disk reads.
+            </p>
+          </div>
+          <div>
+            <label style={{ color: '#8890a0', fontSize: '0.7rem', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>Stats Cache TTL (seconds)</label>
+            <input
+              style={{ ...inputStyle, width: '120px' }}
+              type="number"
+              min={300}
+              value={globalForm.backup_stats_cache_ttl}
+              onChange={e => { setGlobalForm({ ...globalForm, backup_stats_cache_ttl: parseInt(e.target.value) || 21600 }); setGlobalDirty(true) }}
+            />
+            <p style={{ color: '#8890a0', fontSize: '0.75rem', margin: '0.35rem 0 0 0' }}>
+              How long to cache stats before re-scanning. Default: 21600 (6 hours).
             </p>
           </div>
         </div>

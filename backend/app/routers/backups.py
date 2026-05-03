@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# --- In-memory stats cache ----
+# --- Stats cache (in-memory + disk-persisted) ---
 
 class PathStat(BaseModel):
     host: str
@@ -39,10 +39,177 @@ class PathStat(BaseModel):
     backup_sets: int = 0
 
 class StatsCache(BaseModel):
-    updated_at: float = 0.0  # unix timestamp
+    updated_at: float = 0.0
     stats: list[PathStat] = []
 
 _stats_cache = StatsCache()
+_refresh_task: asyncio.Task | None = None  # background refresh task
+
+
+def _cache_path() -> "Path":
+    from pathlib import Path
+    return Path(settings.homelab_repo_path) / "backups" / "stats_cache.json"
+
+
+def _load_cache_from_disk() -> StatsCache:
+    try:
+        p = _cache_path()
+        if p.exists():
+            return StatsCache.model_validate_json(p.read_text())
+    except Exception as e:
+        logger.warning("Could not load backup stats cache from disk: %s", e)
+    return StatsCache()
+
+
+def _save_cache_to_disk(cache: StatsCache) -> None:
+    try:
+        p = _cache_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(cache.model_dump_json())
+    except Exception as e:
+        logger.warning("Could not save backup stats cache to disk: %s", e)
+
+
+def _build_slug_commands(backup_target: str, host: str, slugs: list[tuple[str, str]]) -> str:
+    """Build a single shell command string that outputs slug<TAB>size<TAB>count for each slug."""
+    cmds = []
+    for orig_path, slug in slugs:
+        slug_dir = f"{backup_target}/{host}/{slug}"
+        cmds.append(
+            f'slug_dir="{slug_dir}"; '
+            f'if [ -d "$slug_dir" ]; then '
+            f'  sz=$(sudo du -sb "$slug_dir" 2>/dev/null | cut -f1); '
+            f'  cnt=$(sudo find "$slug_dir" -maxdepth 1 -mindepth 1 -type d ! -name latest 2>/dev/null | wc -l); '
+            f'  echo "{slug}\t$sz\t$cnt"; '
+            f'else echo "{slug}\t0\t0"; fi'
+        )
+    return " && ".join(cmds)
+
+
+def _parse_stat_output(stdout: str) -> dict[str, tuple[int, int]]:
+    stat_map: dict[str, tuple[int, int]] = {}
+    for line in stdout.strip().split("\n"):
+        parts = line.strip().split("\t")
+        if len(parts) >= 3:
+            try:
+                stat_map[parts[0]] = (int(parts[1]), int(parts[2]))
+            except ValueError:
+                pass
+    return stat_map
+
+
+async def _do_refresh(repo_path: str) -> StatsCache:
+    """SSH to backup hosts and collect size/count stats. Returns updated cache."""
+    global _stats_cache
+
+    gs = get_global_settings(repo_path)
+    backup_target = gs.backup_target
+    if not backup_target:
+        return _stats_cache
+
+    from app.services.container_store import ContainerStore as CS
+    containers = CS(repo_path).list_all()
+    all_paths = get_all_backup_paths(containers, repo_path)
+
+    loop = asyncio.get_event_loop()
+    results: list[PathStat] = []
+
+    # --- NFS host mode: single SSH to the storage host, scan all paths locally ---
+    if gs.backup_stats_host:
+        nfs_host = gs.backup_stats_host
+        try:
+            ip, user, pem = await _resolve_host_ssh(nfs_host)
+        except Exception as e:
+            logger.warning("Backup stats: cannot resolve SSH for stats host '%s': %s", nfs_host, e)
+            return _stats_cache  # keep old cache, don't overwrite with empty
+
+        # Group all paths by their original host (still need host in the backup path)
+        by_host: dict[str, list[BackupPath]] = {}
+        for p in all_paths:
+            by_host.setdefault(p.host, []).append(p)
+
+        # Build one big command covering all hosts/slugs
+        # Use printf to avoid tab/newline issues; default sz/cnt to 0 if du/find fails
+        all_cmds: list[str] = []
+        all_slugs: list[tuple[str, str, str]] = []  # (host, orig_path, slug)
+        for host, host_paths in sorted(by_host.items()):
+            for bp in host_paths:
+                slug = path_slug(bp.path)
+                slug_dir = f"{backup_target}/{host}/{slug}"
+                all_cmds.append(
+                    f'if [ -d "{slug_dir}" ]; then '
+                    f'sz=$(du -sb "{slug_dir}" 2>/dev/null | cut -f1); '
+                    f'cnt=$(find "{slug_dir}" -maxdepth 1 -mindepth 1 -type d ! -name latest 2>/dev/null | wc -l); '
+                    f'printf "%s\\t%s\\t%s\\n" "{host}|{slug}" "${{sz:-0}}" "${{cnt:-0}}"; '
+                    f'else printf "%s\\t0\\t0\\n" "{host}|{slug}"; fi'
+                )
+                all_slugs.append((host, bp.path, slug))
+
+        full_cmd = "; ".join(all_cmds)
+        logger.info("Backup stats: SSHing to %s (%s) to scan %d paths", nfs_host, ip, len(all_slugs))
+        try:
+            exit_code, stdout, stderr = await loop.run_in_executor(
+                None, lambda: _ssh_exec(ip, user, pem, full_cmd, timeout=180)
+            )
+            logger.debug("Backup stats SSH exit=%d stdout=%r stderr=%r", exit_code, stdout[:200] if stdout else '', stderr[:200] if stderr else '')
+            stat_map: dict[str, tuple[int, int]] = {}
+            for line in (stdout or "").strip().split("\n"):
+                parts = line.strip().split("\t")
+                if len(parts) >= 3:
+                    try:
+                        stat_map[parts[0]] = (int(parts[1].strip()), int(parts[2].strip()))
+                    except ValueError:
+                        logger.debug("Backup stats: could not parse line: %r", line)
+            if not stat_map:
+                logger.warning("Backup stats: no results parsed from SSH output (exit=%d, stderr=%s)", exit_code, stderr[:300] if stderr else '')
+            for host, orig_path, slug in all_slugs:
+                sz, cnt = stat_map.get(f"{host}|{slug}", (0, 0))
+                results.append(PathStat(host=host, path=orig_path, slug=slug, size_bytes=sz, backup_sets=cnt))
+        except Exception as e:
+            logger.warning("Backup stats: SSH exec failed for %s: %s", nfs_host, e)
+            return _stats_cache  # keep old cache
+            for host, orig_path, slug in all_slugs:
+                results.append(PathStat(host=host, path=orig_path, slug=slug))
+
+    else:
+        # --- Per-host mode: parallel SSH to each docker host ---
+        by_host: dict[str, list[BackupPath]] = {}
+        for p in all_paths:
+            by_host.setdefault(p.host, []).append(p)
+
+        async def _scan_host(host: str, host_paths: list[BackupPath]) -> list[PathStat]:
+            try:
+                ip, user, pem = await _resolve_host_ssh(host)
+            except Exception as e:
+                logger.warning("Stats: cannot resolve SSH for %s: %s", host, e)
+                return [PathStat(host=host, path=bp.path, slug=path_slug(bp.path)) for bp in host_paths]
+
+            slugs = [(bp.path, path_slug(bp.path)) for bp in host_paths]
+            cmd = _build_slug_commands(backup_target, host, slugs)
+            try:
+                exit_code, stdout, _ = await loop.run_in_executor(
+                    None, lambda: _ssh_exec(ip, user, pem, cmd, timeout=120)
+                )
+                stat_map = _parse_stat_output(stdout) if exit_code == 0 else {}
+            except Exception as e:
+                logger.warning("Stats SSH exec failed for %s: %s", host, e)
+                stat_map = {}
+
+            return [
+                PathStat(host=host, path=op, slug=sl, size_bytes=stat_map.get(sl, (0, 0))[0], backup_sets=stat_map.get(sl, (0, 0))[1])
+                for op, sl in slugs
+            ]
+
+        gathered = await asyncio.gather(*[_scan_host(h, ps) for h, ps in by_host.items()], return_exceptions=True)
+        for item in gathered:
+            if isinstance(item, list):
+                results.extend(item)
+
+    cache = StatsCache(updated_at=time.time(), stats=results)
+    _stats_cache = cache
+    _save_cache_to_disk(cache)
+    logger.info("Backup stats refreshed: %d paths", len(results))
+    return cache
 
 
 def get_store() -> ContainerStore:
@@ -110,91 +277,35 @@ async def delete_manual_path(index: int) -> list[ManualBackupPath]:
 
 
 @router.get("/stats")
-async def get_backup_stats(
-    refresh: bool = False,
-    store: ContainerStore = Depends(get_store),
-):
-    """Return size and backup set count per path. Cached; pass ?refresh=true to recalculate."""
-    global _stats_cache
+async def get_backup_stats(refresh: bool = False):
+    """Return backup size/count stats. Stale-while-revalidate: returns cached data immediately,
+    triggers background refresh if stale. Pass ?refresh=true to force foreground refresh."""
+    global _stats_cache, _refresh_task
 
-    # Return cache if fresh and not forcing refresh
-    CACHE_TTL = 3600  # 1 hour
-    if not refresh and _stats_cache.updated_at > 0 and (time.time() - _stats_cache.updated_at) < CACHE_TTL:
-        return {"updated_at": _stats_cache.updated_at, "stats": [s.model_dump() for s in _stats_cache.stats]}
+    # Load from disk on first request if in-memory cache is empty
+    if _stats_cache.updated_at == 0:
+        _stats_cache = _load_cache_from_disk()
 
     gs = get_global_settings(settings.homelab_repo_path)
-    backup_target = gs.backup_target
-    if not backup_target:
-        return {"updated_at": 0, "stats": []}
+    ttl = gs.backup_stats_cache_ttl
+    age = time.time() - _stats_cache.updated_at
+    is_stale = _stats_cache.updated_at == 0 or age > ttl
 
-    containers = store.list_all()
-    all_paths = get_all_backup_paths(containers, settings.homelab_repo_path)
+    if refresh:
+        # Foreground refresh — caller waits for fresh data
+        cache = await _do_refresh(settings.homelab_repo_path)
+        return {"updated_at": cache.updated_at, "stale": False, "stats": [s.model_dump() for s in cache.stats]}
 
-    # Group paths by host
-    by_host: dict[str, list[BackupPath]] = {}
-    for p in all_paths:
-        by_host.setdefault(p.host, []).append(p)
+    if is_stale:
+        # Kick off background refresh if not already running
+        if _refresh_task is None or _refresh_task.done():
+            _refresh_task = asyncio.create_task(_do_refresh(settings.homelab_repo_path))
 
-    loop = asyncio.get_event_loop()
-    results: list[PathStat] = []
-
-    for host, host_paths in by_host.items():
-        try:
-            ip, user, pem = await _resolve_host_ssh(host)
-        except Exception as e:
-            logger.warning("Stats: cannot resolve SSH for %s: %s", host, e)
-            for bp in host_paths:
-                results.append(PathStat(host=host, path=bp.path, slug=path_slug(bp.path)))
-            continue
-
-        # Build a single command that gets size and set count for all slugs on this host
-        slugs = []
-        for bp in host_paths:
-            slug = path_slug(bp.path)
-            slugs.append((bp.path, slug))
-
-        # One SSH call per host: for each slug dir, output "slug<TAB>size<TAB>count"
-        cmds = []
-        for orig_path, slug in slugs:
-            slug_dir = f"{backup_target}/{host}/{slug}"
-            # du -sb for total size; ls -1d to count date dirs (exclude 'latest')
-            cmds.append(
-                f'slug_dir="{slug_dir}"; '
-                f'if [ -d "$slug_dir" ]; then '
-                f'  sz=$(sudo du -sb "$slug_dir" 2>/dev/null | cut -f1); '
-                f'  cnt=$(sudo find "$slug_dir" -maxdepth 1 -mindepth 1 -type d ! -name latest 2>/dev/null | wc -l); '
-                f'  echo "{slug}\t$sz\t$cnt"; '
-                f'else echo "{slug}\t0\t0"; fi'
-            )
-        full_cmd = " && ".join(cmds)
-
-        try:
-            exit_code, stdout, stderr = await loop.run_in_executor(
-                None, lambda: _ssh_exec(ip, user, pem, full_cmd, timeout=120)
-            )
-        except Exception as e:
-            logger.warning("Stats SSH exec failed for %s: %s", host, e)
-            for orig_path, slug in slugs:
-                results.append(PathStat(host=host, path=orig_path, slug=slug))
-            continue
-
-        # Parse output
-        stat_map: dict[str, tuple[int, int]] = {}
-        if exit_code == 0 and stdout.strip():
-            for line in stdout.strip().split("\n"):
-                parts = line.strip().split("\t")
-                if len(parts) >= 3:
-                    try:
-                        stat_map[parts[0]] = (int(parts[1]), int(parts[2]))
-                    except ValueError:
-                        pass
-
-        for orig_path, slug in slugs:
-            sz, cnt = stat_map.get(slug, (0, 0))
-            results.append(PathStat(host=host, path=orig_path, slug=slug, size_bytes=sz, backup_sets=cnt))
-
-    _stats_cache = StatsCache(updated_at=time.time(), stats=results)
-    return {"updated_at": _stats_cache.updated_at, "stats": [s.model_dump() for s in results]}
+    return {
+        "updated_at": _stats_cache.updated_at,
+        "stale": is_stale,
+        "stats": [s.model_dump() for s in _stats_cache.stats],
+    }
 
 
 # --- Cron status per host ---

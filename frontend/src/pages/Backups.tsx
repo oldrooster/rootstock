@@ -233,6 +233,7 @@ export default function Backups() {
   const [stats, setStats] = useState<PathStat[]>([])
   const [statsUpdatedAt, setStatsUpdatedAt] = useState<number>(0)
   const [statsLoading, setStatsLoading] = useState(false)
+  const [statsStale, setStatsStale] = useState(false)
 
   // Export/Import
   const [importing, setImporting] = useState(false)
@@ -269,9 +270,10 @@ export default function Backups() {
     setStatsLoading(true)
     fetch(`/api/backups/stats${refresh ? '?refresh=true' : ''}`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-      .then((data: StatsResponse) => {
+      .then((data: StatsResponse & { stale?: boolean }) => {
         setStats(data.stats)
         setStatsUpdatedAt(data.updated_at)
+        setStatsStale(data.stale ?? false)
       })
       .catch(e => console.error('Failed to load stats:', e))
       .finally(() => setStatsLoading(false))
@@ -775,6 +777,7 @@ export default function Backups() {
             {statsUpdatedAt > 0 && (
               <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>
                 Stats: {new Date(statsUpdatedAt * 1000).toLocaleString()}
+                {statsStale && <span style={{ color: '#f59e0b', marginLeft: '0.4rem' }}>(refreshing...)</span>}
               </span>
             )}
             <button style={{ ...btnSecondary, fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
