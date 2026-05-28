@@ -424,26 +424,39 @@ async def purge_backups(body: PurgeRequest):
     if not backup_target:
         raise HTTPException(400, "Backup target not configured")
 
+    # Use stats host (NFS server) if configured — local disk rm is much faster
+    ssh_host = gs.backup_stats_host or None
     loop = asyncio.get_event_loop()
     results: list[dict] = []
+
+    # Resolve SSH once if using a single stats host
+    stats_ssh: tuple[str, str, str] | None = None
+    if ssh_host:
+        try:
+            stats_ssh = await _resolve_host_ssh(ssh_host)
+        except Exception as e:
+            raise HTTPException(400, f"Cannot resolve SSH for stats host '{ssh_host}': {e}")
 
     for item in body.items:
         host = item["host"]
         slug = item["path"]  # frontend sends the slug directly from snapshots
         dates = item.get("dates", [])
 
-        try:
-            ip, user, pem = await _resolve_host_ssh(host)
-        except Exception as e:
-            results.append({"host": host, "slug": slug, "error": f"SSH failed: {e}"})
-            continue
+        if stats_ssh:
+            ip, user, pem = stats_ssh
+        else:
+            try:
+                ip, user, pem = await _resolve_host_ssh(host)
+            except Exception as e:
+                results.append({"host": host, "slug": slug, "error": f"SSH failed: {e}"})
+                continue
 
         for date in dates:
             snapshot_dir = f"{backup_target}/{host}/{slug}/{date}"
             try:
                 exit_code, _, stderr = await loop.run_in_executor(
                     None, lambda d=snapshot_dir: _ssh_exec(ip, user, pem,
-                                                           f"sudo rm -rf {shlex.quote(d)}", timeout=120)
+                                                           f"rm -rf {shlex.quote(d)}", timeout=120)
                 )
                 if exit_code != 0:
                     results.append({"host": host, "slug": slug, "date": date,
@@ -464,17 +477,19 @@ async def list_snapshots(host_name: str) -> list[dict]:
     """List available backup snapshots for a host. Returns [{path, slug, dates}]."""
     gs = get_global_settings(settings.homelab_repo_path)
     backup_target = gs.backup_target
+    # Use stats host (NFS server) if configured — local disk listing is faster
+    ssh_target = gs.backup_stats_host or host_name
     try:
-        ip, user, pem = await _resolve_host_ssh(host_name)
+        ip, user, pem = await _resolve_host_ssh(ssh_target)
     except Exception as e:
-        raise HTTPException(400, f"Cannot resolve SSH for '{host_name}': {e}")
+        raise HTTPException(400, f"Cannot resolve SSH for '{ssh_target}': {e}")
 
     loop = asyncio.get_event_loop()
     # List all slug directories for this host
     host_dir = f"{backup_target}/{host_name}"
     exit_code, stdout, _ = await loop.run_in_executor(
         None, lambda: _ssh_exec(ip, user, pem,
-                                f"sudo find {host_dir} -maxdepth 2 -mindepth 2 -type d 2>/dev/null | sort")
+                                f"find {host_dir} -maxdepth 2 -mindepth 2 -type d 2>/dev/null | sort")
     )
     if exit_code != 0 or not stdout.strip():
         return []

@@ -36,6 +36,7 @@ interface Container {
   build_dockerfile: string
   build_context: string
   build_target: string
+  command: string
   depends_on: string[]
   healthcheck: HealthCheck | null
 }
@@ -137,6 +138,7 @@ interface FormData {
   build_dockerfile: string
   build_context: string
   build_target: string
+  command: string
   depends_on: string[]
   healthcheck_test: string
   healthcheck_interval: string
@@ -152,7 +154,7 @@ const emptyForm: FormData = {
   ports_text: '', volumes: [], env_text: '',
   devices_text: '',
   compose_extras_text: '',
-  build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.', build_target: '',
+  build_repo: '', build_branch: 'main', build_dockerfile: 'Dockerfile', build_context: '.', build_target: '', command: '',
   depends_on: [],
   healthcheck_test: '', healthcheck_interval: '30s', healthcheck_timeout: '10s', healthcheck_retries: '3',
 }
@@ -186,6 +188,7 @@ function containerToForm(c: Container): FormData {
     build_dockerfile: c.build_dockerfile || 'Dockerfile',
     build_context: c.build_context || '.',
     build_target: c.build_target || '',
+    command: c.command || '',
     depends_on: c.depends_on || [],
     healthcheck_test: c.healthcheck?.test || '',
     healthcheck_interval: c.healthcheck?.interval || '30s',
@@ -254,6 +257,7 @@ function formToPayload(f: FormData) {
   payload.build_dockerfile = f.build_dockerfile
   payload.build_context = f.build_context
   payload.build_target = f.build_target
+  payload.command = f.command
   payload.depends_on = f.depends_on
 
   if (f.healthcheck_test.trim()) {
@@ -680,6 +684,11 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
               <label style={labelStyle}>Image</label>
               <input style={inputStyle} value={form.image}
                 onChange={e => set('image', e.target.value)} placeholder="lscr.io/linuxserver/unifi-network-application:latest" />
+            </div>
+            <div>
+              <label style={labelStyle}>Command <span style={{ color: '#6b7280', fontWeight: 400 }}>(optional override)</span></label>
+              <input style={inputStyle} value={form.command}
+                onChange={e => set('command', e.target.value)} placeholder="e.g. --config /config/custom.yml" />
             </div>
           </div>
         )}

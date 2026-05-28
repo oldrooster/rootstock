@@ -73,6 +73,9 @@ def generate_compose(
             "restart": "unless-stopped",
         }
 
+        if ctr.command:
+            svc["command"] = ctr.command
+
         # Environment
         if compose_env:
             svc["environment"] = compose_env
