@@ -42,6 +42,7 @@ class ContainerDefinition(BaseModel):
         return _validate_name(v)
 
     image: str
+    protected: bool = False  # if True, excluded from Ansible container deploys
     hosts: list[str] = []
     host_rule: str = ""  # e.g. "role:docker"
     dns_name: str = ""
@@ -114,6 +115,7 @@ class ContainerCreate(BaseModel):
         return _validate_name(v)
 
     image: str
+    protected: bool = False
     hosts: list[str] = []
     host_rule: str = ""
     dns_name: str = ""
@@ -140,6 +142,7 @@ class ContainerCreate(BaseModel):
 class ContainerUpdate(BaseModel):
     enabled: bool | None = None
     image: str | None = None
+    protected: bool | None = None
     hosts: list[str] | None = None
     host_rule: str | None = None
     dns_name: str | None = None

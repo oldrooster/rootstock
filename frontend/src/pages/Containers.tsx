@@ -17,6 +17,7 @@ interface HealthCheck {
 interface Container {
   name: string
   enabled: boolean
+  protected: boolean
   image: string
   hosts: string[]
   host_rule: string
@@ -120,6 +121,7 @@ interface FormData {
   name: string
   image: string
   enabled: boolean
+  protected: boolean
   hosts: string
   host_rule: string
   dns_name: string
@@ -147,7 +149,7 @@ interface FormData {
 }
 
 const emptyForm: FormData = {
-  name: '', image: '', enabled: true,
+  name: '', image: '', enabled: true, protected: false,
   hosts: '', host_rule: '',
   dns_name: '', ingress_mode: 'none', ingress_port: '', ingress_https: false, external: false,
   network: 'backend',
@@ -164,6 +166,7 @@ function containerToForm(c: Container): FormData {
     name: c.name,
     image: c.image,
     enabled: c.enabled,
+    protected: c.protected || false,
     hosts: (c.hosts || []).join(', '),
     host_rule: c.host_rule || '',
     dns_name: c.dns_name || '',
@@ -202,6 +205,7 @@ function formToPayload(f: FormData) {
     name: f.name,
     image: f.image,
     enabled: f.enabled,
+    protected: f.protected,
     hosts: f.hosts.split(',').map(s => s.trim()).filter(Boolean),
     host_rule: f.host_rule,
     dns_name: f.dns_name,
@@ -916,6 +920,11 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
             onChange={e => set('enabled', e.target.checked)} />
           Enabled
         </label>
+        <label style={{ color: '#ef4444', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }} title="Protected containers are never included in container deploys">
+          <input type="checkbox" checked={form.protected}
+            onChange={e => set('protected', e.target.checked)} />
+          Protected (exclude from deploy)
+        </label>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem' }}>
           <button style={btnSecondary} onClick={onCancel}>Cancel</button>
           <button style={btnPrimary} onClick={onSubmit}>{submitLabel}</button>
@@ -1504,6 +1513,9 @@ export default function Containers() {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem', flexWrap: 'wrap' }}>
                   <span style={{ color: '#e0e0e0', fontWeight: 600, fontSize: '1rem' }}>{ctr.name}</span>
+                  {ctr.protected && (
+                    <span style={{ fontSize: '0.65rem', padding: '0.1rem 0.4rem', borderRadius: '9999px', background: 'rgba(239,68,68,0.15)', color: '#ef4444', fontWeight: 600 }}>protected</span>
+                  )}
                   {(() => {
                     const hostStatuses = statuses[ctr.name]
                     let label = 'not provisioned'

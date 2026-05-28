@@ -918,17 +918,26 @@ export default function Backups() {
       {stats.length > 0 && (() => {
         const maxBytes = Math.max(...stats.map(s => s.size_bytes), 1)
         const sorted = [...stats].sort((a, b) => b.size_bytes - a.size_bytes)
+
+        // Build lookup: "host:path" -> container name (extracted from description)
+        const containerLabel: Record<string, string> = {}
+        for (const p of paths) {
+          const m = p.description?.match(/from container '([^']+)'/)
+          if (m) containerLabel[`${p.host}:${p.path}`] = m[1]
+        }
+
         return (
           <div style={cardStyle}>
             <h2 style={{ color: '#e0e0e0', fontSize: '1rem', margin: '0 0 0.75rem 0' }}>Backup Size by Path</h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
               {sorted.map((s, i) => {
                 const pct = maxBytes > 0 ? (s.size_bytes / maxBytes) * 100 : 0
                 const label = `${s.host}: ${s.path.replace(/^.*\/([^/]+)$/, '$1')}`
+                const ctrName = containerLabel[`${s.host}:${s.path}`]
                 return (
                   <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                     <div style={{ width: '200px', flexShrink: 0, color: '#8890a0', fontSize: '0.75rem', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={label}>{label}</div>
-                    <div style={{ flex: 1, height: '14px', background: '#0f0f1a', borderRadius: '3px', overflow: 'hidden', position: 'relative' }}>
+                    <div style={{ flex: 1, height: '14px', background: '#0f0f1a', borderRadius: '3px', overflow: 'hidden' }}>
                       <div style={{
                         width: `${pct}%`, height: '100%', borderRadius: '3px',
                         background: pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#7c9ef8',
@@ -937,6 +946,16 @@ export default function Backups() {
                     </div>
                     <div style={{ width: '70px', flexShrink: 0, color: '#e0e0e0', fontSize: '0.78rem', textAlign: 'right', fontFamily: 'monospace' }}>
                       {formatBytes(s.size_bytes)}
+                    </div>
+                    <div style={{ width: '110px', flexShrink: 0 }}>
+                      {ctrName && (
+                        <span style={{
+                          fontSize: '0.68rem', padding: '0.1rem 0.4rem', borderRadius: '9999px',
+                          background: 'rgba(124,158,248,0.15)', color: '#7c9ef8',
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                          display: 'inline-block', maxWidth: '100%',
+                        }} title={ctrName}>{ctrName}</span>
+                      )}
                     </div>
                   </div>
                 )

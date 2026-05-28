@@ -133,8 +133,9 @@ def prepare_ansible_workspace(
 
     elif scope == "containers":
         from app.services.containers_executor import write_containers_playbook
+        deployable = [c for c in (containers or []) if not getattr(c, "protected", False)]
         write_containers_playbook(
-            workspace_dir, repo_path, containers or [], nodes, vms,
+            workspace_dir, repo_path, deployable, nodes, vms,
             secret_store, filter_hosts=filter_hosts, free_strategy=free_strategy,
         )
 
