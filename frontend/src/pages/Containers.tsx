@@ -22,6 +22,7 @@ interface Container {
   hosts: string[]
   host_rule: string
   dns_name: string
+  dns_aliases: string[]
   ingress_mode: string
   ingress_port: number
   ingress_https: boolean
@@ -125,6 +126,7 @@ interface FormData {
   hosts: string
   host_rule: string
   dns_name: string
+  dns_aliases: string[]
   ingress_mode: string
   ingress_port: string
   ingress_https: boolean
@@ -151,7 +153,7 @@ interface FormData {
 const emptyForm: FormData = {
   name: '', image: '', enabled: true, protected: false,
   hosts: '', host_rule: '',
-  dns_name: '', ingress_mode: 'none', ingress_port: '', ingress_https: false, external: false,
+  dns_name: '', dns_aliases: [], ingress_mode: 'none', ingress_port: '', ingress_https: false, external: false,
   network: 'backend',
   ports_text: '', volumes: [], env_text: '',
   devices_text: '',
@@ -170,6 +172,7 @@ function containerToForm(c: Container): FormData {
     hosts: (c.hosts || []).join(', '),
     host_rule: c.host_rule || '',
     dns_name: c.dns_name || '',
+    dns_aliases: c.dns_aliases || [],
     ingress_mode: c.ingress_mode || 'none',
     ingress_port: c.ingress_port ? String(c.ingress_port) : '',
     ingress_https: c.ingress_https || false,
@@ -209,6 +212,7 @@ function formToPayload(f: FormData) {
     hosts: f.hosts.split(',').map(s => s.trim()).filter(Boolean),
     host_rule: f.host_rule,
     dns_name: f.dns_name,
+    dns_aliases: f.dns_aliases,
     ingress_mode: f.ingress_mode,
     ingress_port: f.ingress_port ? Number(f.ingress_port) : 0,
     ingress_https: f.ingress_https,
@@ -564,6 +568,7 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
     ...rawForm,
     ingress_https: rawForm.ingress_https || false,
     depends_on: rawForm.depends_on || [],
+    dns_aliases: rawForm.dns_aliases || [],
     healthcheck_test: rawForm.healthcheck_test || '',
     healthcheck_interval: rawForm.healthcheck_interval || '30s',
     healthcheck_timeout: rawForm.healthcheck_timeout || '10s',
@@ -577,6 +582,7 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')
   const [importError, setImportError] = useState<string | null>(null)
+  const [aliasInput, setAliasInput] = useState('')
 
   const set = (field: keyof FormData, value: string | boolean) =>
     setForm({ ...form, [field]: value })
@@ -772,6 +778,39 @@ function ContainerForm({ form: rawForm, setForm, onSubmit, onCancel, submitLabel
             </select>
           </div>
         </div>
+        {form.dns_name && (
+          <div style={{ marginBottom: ROW_GAP }}>
+            <label style={labelStyle}>DNS Aliases (additional hostnames for the same service)</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.4rem' }}>
+              {form.dns_aliases.map(alias => (
+                <span key={alias} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem', padding: '0.2rem 0.5rem', borderRadius: '9999px', border: '1px solid #2a2a3e', color: '#7c9ef8', background: 'rgba(124,158,248,0.1)' }}>
+                  {alias}
+                  <button onClick={() => setForm({ ...form, dns_aliases: form.dns_aliases.filter(a => a !== alias) })}
+                    style={{ background: 'none', border: 'none', color: '#8890a0', cursor: 'pointer', padding: 0, lineHeight: 1, fontSize: '0.85rem' }}>×</button>
+                </span>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem', maxWidth: 'calc(50% - 0.5rem)' }}>
+              <input style={inputStyle} value={aliasInput} onChange={e => setAliasInput(e.target.value)}
+                onKeyDown={e => {
+                  if ((e.key === 'Enter' || e.key === ',') && aliasInput.trim()) {
+                    e.preventDefault()
+                    const v = aliasInput.trim().replace(/,$/, '')
+                    if (v && !form.dns_aliases.includes(v)) setForm({ ...form, dns_aliases: [...form.dns_aliases, v] })
+                    setAliasInput('')
+                  }
+                }}
+                placeholder="alias.cbf.nz" />
+              <button type="button"
+                onClick={() => {
+                  const v = aliasInput.trim()
+                  if (v && !form.dns_aliases.includes(v)) setForm({ ...form, dns_aliases: [...form.dns_aliases, v] })
+                  setAliasInput('')
+                }}
+                style={{ background: '#2a2a3e', border: '1px solid #3a3a4e', color: '#e0e0e0', borderRadius: '4px', padding: '0.4rem 0.7rem', cursor: 'pointer', whiteSpace: 'nowrap', fontSize: '0.85rem' }}>Add</button>
+            </div>
+          </div>
+        )}
         {form.ingress_mode === 'caddy' && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: GAP, marginBottom: ROW_GAP }}>
             <div>

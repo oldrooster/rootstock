@@ -46,6 +46,7 @@ class ContainerDefinition(BaseModel):
     hosts: list[str] = []
     host_rule: str = ""  # e.g. "role:docker"
     dns_name: str = ""
+    dns_aliases: list[str] = []
     ingress_mode: str = "none"  # "caddy" | "direct" | "none"
     ingress_port: int = 0
     ingress_https: bool = False  # proxy to container's HTTPS port (skips TLS verify)
@@ -119,6 +120,7 @@ class ContainerCreate(BaseModel):
     hosts: list[str] = []
     host_rule: str = ""
     dns_name: str = ""
+    dns_aliases: list[str] = []
     ingress_mode: str = "none"
     ingress_port: int = 0
     ingress_https: bool = False
@@ -146,6 +148,7 @@ class ContainerUpdate(BaseModel):
     hosts: list[str] | None = None
     host_rule: str | None = None
     dns_name: str | None = None
+    dns_aliases: list[str] | None = None
     ingress_mode: str | None = None
     ingress_port: int | None = None
     ingress_https: bool | None = None

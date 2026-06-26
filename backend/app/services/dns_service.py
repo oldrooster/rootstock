@@ -94,6 +94,14 @@ def get_all_records(
                 description=f"from container '{ctr.name}'",
                 host=host,
             ))
+            for alias in ctr.dns_aliases:
+                records.append(DNSRecord(
+                    hostname=alias,
+                    ip=ip,
+                    source="container",
+                    description=f"from container '{ctr.name}' (alias)",
+                    host=host,
+                ))
 
     # Derive DNS entries from manual ingress proxy rules
     for rule in get_manual_rules(repo_path):

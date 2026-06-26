@@ -35,29 +35,32 @@ def generate_caddyfile(
         if host and host not in ctr.hosts:
             continue
 
+        hostnames = [ctr.dns_name] + list(ctr.dns_aliases)
         if ctr.ingress_https:
             upstream = f"https://{ctr.name}:{ctr.ingress_port}"
-            blocks.append(
-                f"{ctr.dns_name} {{\n"
-                f"    reverse_proxy {upstream} {{\n"
-                f"        header_up Host {{host}}\n"
-                f"        header_up X-Real-IP {{remote_host}}\n"
-                f"        header_up X-Forwarded-For {{remote_host}}\n"
-                f"        header_up X-Forwarded-Proto {{scheme}}\n"
-                f"        transport http {{\n"
-                f"            tls\n"
-                f"            tls_insecure_skip_verify\n"
-                f"        }}\n"
-                f"    }}\n"
-                f"}}"
-            )
+            for hostname in hostnames:
+                blocks.append(
+                    f"{hostname} {{\n"
+                    f"    reverse_proxy {upstream} {{\n"
+                    f"        header_up Host {{host}}\n"
+                    f"        header_up X-Real-IP {{remote_host}}\n"
+                    f"        header_up X-Forwarded-For {{remote_host}}\n"
+                    f"        header_up X-Forwarded-Proto {{scheme}}\n"
+                    f"        transport http {{\n"
+                    f"            tls\n"
+                    f"            tls_insecure_skip_verify\n"
+                    f"        }}\n"
+                    f"    }}\n"
+                    f"}}"
+                )
         else:
             upstream = f"{ctr.name}:{ctr.ingress_port}"
-            blocks.append(
-                f"{ctr.dns_name} {{\n"
-                f"    reverse_proxy {upstream}\n"
-                f"}}"
-            )
+            for hostname in hostnames:
+                blocks.append(
+                    f"{hostname} {{\n"
+                    f"    reverse_proxy {upstream}\n"
+                    f"}}"
+                )
 
     # Manual proxy rules
     if manual_rules:
